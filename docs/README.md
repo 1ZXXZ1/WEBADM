@@ -64,48 +64,17 @@ uvicorn app.main:app --host 127.0.0.1 --port 8099
 
 ```bash
 # Health check (без аутентификации)
-curl http://127.0.0.1:8099/health
+curl -k  https://127.0.0.1:8099/health
 
 # Пример API-запроса
-curl -H "X-API-Key: YOUR_KEY" "http://127.0.0.1:8099/api/v1/domain/info?ip_address=127.0.0.1"
-curl -H "X-API-Key: YOUR_KEY" http://127.0.0.1:8099/api/v1/users
+curl -H "X-API-Key: YOUR_KEY" "https://127.0.0.1:8099/api/v1/domain/info?ip_address=127.0.0.1"
+curl -H "X-API-Key: YOUR_KEY" https://127.0.0.1:8099/api/v1/users
 ```
 
 ### 5. Документация
 
-Откройте http://127.0.0.1:8099/docs в браузере для Swagger UI.
+Откройте https://127.0.0.1:8099/docs в браузере для Swagger UI.
 
-## CLI-клиент
-
-### Важно: порядок аргумента `--api-key`
-
-Флаг `--api-key` является опцией **корневой** команды и должен указываться **ДО** подкоманды:
-
-```bash
-# ПРАВИЛЬНО:
-python cli.py --api-key KEY user list
-python cli.py --api-key KEY domain info
-
-# НЕВЕРНО (click не распознает --api-key после подкоманды):
-python cli.py user list --api-key KEY
-```
-
-### Рекомендуемый способ: переменная окружения или .env
-
-Чтобы не указывать `--api-key` при каждом вызове, используйте один из способов:
-
-```bash
-# Способ 1: переменная окружения
-export SAMBA_API_KEY=your-key
-python cli.py user list
-python cli.py group list
-
-# Способ 2: файл .env в текущей директории
-# Создайте файл .env со строкой:
-# SAMBA_API_KEY=your-key
-# SAMBA_API_SERVER=http://127.0.0.1:8099
-python cli.py user list  # .env загружается автоматически
-```
 ## Совместимость версий samba-tool
 
 API-сервер автоматически адаптируется к установленной версии `samba-tool`. Поддерживаются три уровня совместимости JSON-вывода:
@@ -161,24 +130,6 @@ export SAMBA_JSON_MODE=force_output_format
 - `GET /api/v1/delegation/` — нет подкоманды `list`; только `show` для конкретной учётной записи
 - `GET /api/v1/misc/forest/info` — нет подкоманды `forest info`; используйте LDAP или `domain info`
 - `GET /api/v1/misc/visualize` — нет подкоманды `drs visualize` в данной версии
-
-## Docker
-
-```bash
-# Сборка
-docker build -t samba-api-server .
-
-# Запуск
-docker run -d \
-  -p 8099:8099 \
-  -e SAMBA_API_KEY=your-secret-key \
-  -v /etc/samba:/etc/samba:ro \
-  -v /var/lib/samba:/var/lib/samba:ro \
-  --name samba-api \
-  samba-api-server
-```
-
-**Важно**: Для операций, требующих root (dbcheck, sysvolreset), контейнер должен работать с соответствующими привилегиями.
 
 ## Тестирование
 
@@ -244,3 +195,4 @@ pytest test_api.py -v --log-cli-level=DEBUG
 ```
 
 HTTP-коды: 400 (неверный запрос), 401 (нет ключа), 403 (нет прав), 404 (не найдено), 409 (конфликт), 500 (ошибка сервера), 504 (таймаут).
+
