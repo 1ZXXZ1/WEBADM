@@ -1,0 +1,27 @@
+# ═══════════════════════════════════════════════════════════════
+# Пример SDB скрипта: Пользователи и группы
+# ═══════════════════════════════════════════════════════════════
+
+# Выбираем основную базу AD
+USE sam;
+
+# Формат вывода — таблица
+FORMAT table;
+
+# Список всех пользователей (только ключевые атрибуты)
+SELECT dn, sAMAccountName, cn, objectClass
+FROM *
+WHERE objectClass=user;
+
+# Список групп
+SELECT dn, cn, sAMAccountName, description
+FROM *
+WHERE objectClass=group;
+
+# Сохраняем в JSON
+FORMAT json;
+OUTPUT /tmp/samba_users.json;
+
+# Список через samba-tool
+TOOL user list;
+TOOL group list;

@@ -1,0 +1,29 @@
+# ═══════════════════════════════════════════════════════════════
+# Пример SDB скрипта: pandas DataFrame
+# ═══════════════════════════════════════════════════════════════
+#
+# Требует установки pandas: pip3 install pandas
+# (или sudo pip3 install pandas для системной установки)
+#
+
+# Выбираем базу
+USE sam;
+
+# Запрашиваем пользователей с нужными полями
+FIELDS dn, sAMAccountName, cn, objectClass, description;
+
+SELECT dn, sAMAccountName, cn, objectClass, description
+FROM * WHERE objectClass=user;
+
+# Показываем как pandas DataFrame
+DATAFRAME;
+
+# Экспорт DataFrame в CSV (через pandas)
+FORMAT dataframe;
+OUTPUT /tmp/samba_users_df.csv;
+
+# Экспорт DataFrame в Excel (нужен openpyxl: pip3 install openpyxl)
+# OUTPUT /tmp/samba_users_df.xlsx;
+
+# Экспорт DataFrame в JSON (через pandas)
+# OUTPUT /tmp/samba_users_df.json;

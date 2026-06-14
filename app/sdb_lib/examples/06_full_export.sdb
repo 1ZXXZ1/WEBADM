@@ -1,0 +1,60 @@
+# ═══════════════════════════════════════════════════════════════
+# Пример SDB скрипта: Полный экспорт всех баз
+# ═══════════════════════════════════════════════════════════════
+
+# Используем переменную для пути вывода
+SET outdir = "/tmp/samba_export";
+
+# ─── SAM (пользователи, группы, компьютеры) ──────────────────
+USE sam;
+
+FORMAT json;
+SELECT dn, sAMAccountName, cn, objectClass, description, objectSid
+FROM * WHERE objectClass=user;
+OUTPUT /tmp/samba_export/sam_users.json;
+
+FORMAT json;
+SELECT dn, cn, sAMAccountName, description, groupType
+FROM * WHERE objectClass=group;
+OUTPUT /tmp/samba_export/sam_groups.json;
+
+FORMAT json;
+SELECT dn, cn, sAMAccountName, objectClass
+FROM * WHERE objectClass=computer;
+OUTPUT /tmp/samba_export/sam_computers.json;
+
+# ─── Привилегии ──────────────────────────────────────────────
+USE privilege;
+FORMAT json;
+
+SELECT * FROM *;
+OUTPUT /tmp/samba_export/privileges.json;
+
+# ─── Шары ────────────────────────────────────────────────────
+USE share;
+FORMAT json;
+
+SELECT * FROM *;
+OUTPUT /tmp/samba_export/shares.json;
+
+# ─── ID маппинг ──────────────────────────────────────────────
+USE idmap;
+FORMAT csv;
+
+FIELDS cn, objectSid, xidNumber, type;
+SELECT * FROM *;
+OUTPUT /tmp/samba_export/idmap.csv;
+
+# ─── Реестр ──────────────────────────────────────────────────
+USE hklm;
+FORMAT tsv;
+
+SELECT * FROM *;
+OUTPUT /tmp/samba_export/hklm.tsv;
+
+# ─── Секреты ─────────────────────────────────────────────────
+USE secrets;
+FORMAT json;
+
+SELECT * FROM *;
+OUTPUT /tmp/samba_export/secrets.json;

@@ -1,0 +1,19 @@
+# ═══════════════════════════════════════════════════════════════
+# Пример SDB скрипта: Привилегии
+# ═══════════════════════════════════════════════════════════════
+
+# База привилегий
+USE privilege;
+
+FORMAT table;
+
+# Все привилегии
+SELECT * FROM *;
+
+# Экспорт в CSV
+FORMAT csv;
+OUTPUT /tmp/samba_privileges.csv;
+
+# Экспорт в JSON
+FORMAT json;
+OUTPUT /tmp/samba_privileges.json;

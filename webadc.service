@@ -1,0 +1,54 @@
+[Unit]
+Description=WebADC — Samba AD API + Web Panel (один порт 8099) v2.0.1
+After=network.target samba.service postgresql.service
+Wants=samba.service postgresql.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/webadc start
+
+# Restart behavior
+Restart=on-failure
+RestartSec=10
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+
+# Environment
+EnvironmentFile=-/etc/webadc/.env
+EnvironmentFile=-/etc/apiadc/.env
+Environment=SAMBA_UVICORN_WORKERS=1
+Environment=SAMBA_WORKER_POOL_SIZE=2
+
+# Security
+NoNewPrivileges=no
+ProtectSystem=full
+ReadWritePaths=/var/tmp /var/log /var/lib/samba /home/AD-API-USER /tmp
+PrivateTmp=true
+
+# Resource limits — memory (idle ~30-50MB, max ~300MB)
+MemoryMin=20M
+MemoryHigh=250M
+MemoryMax=350M
+
+# Resource limits — CPU (max 2 cores)
+CPUQuota=200%
+
+# Resource limits — processes
+TasksMax=30
+
+# File descriptors
+LimitNOFILE=65536
+
+# Timeouts
+TimeoutStartSec=30
+TimeoutStopSec=15
+
+# Watchdog — restart if unresponsive for 60s
+WatchdogSec=60
+
+[Install]
+WantedBy=multi-user.target

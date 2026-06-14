@@ -1,0 +1,86 @@
+# ═══════════════════════════════════════════════════════════════
+# Пример SDB скрипта: samba-tool команды (полный список)
+# ═══════════════════════════════════════════════════════════════
+
+# ─── Пользователи ────────────────────────────────────────────
+TOOL user list;
+# TOOL user create newuser P@ssw0rd --given-name=Иван --surname=Иванов;
+# TOOL user show Administrator;
+# TOOL user getgroups Administrator;
+# TOOL user disable newuser;
+# TOOL user enable newuser;
+# TOOL user setpassword newuser --newpassword=NewP@ss;
+# TOOL user rename newuser olduser;
+# TOOL user delete newuser;
+
+# ─── Группы ──────────────────────────────────────────────────
+TOOL group list;
+TOOL group listmembers "Domain Admins";
+# TOOL group create "TestGroup" --description="Тестовая группа";
+# TOOL group addmembers "Domain Admins" username;
+# TOOL group removemembers "Domain Admins" username;
+# TOOL group show "Domain Users";
+# TOOL group delete "TestGroup";
+
+# ─── Компьютеры ──────────────────────────────────────────────
+TOOL computer list;
+# TOOL computer create COMPUTER01 P@ssw0rd;
+# TOOL computer show WIN10;
+# TOOL computer delete COMPUTER01;
+
+# ─── DNS ─────────────────────────────────────────────────────
+# TOOL dns query kcrb.local @ ALL;
+# TOOL dns query kcrb.local @ A;
+# TOOL dns query kcrb.local @ SRV;
+# TOOL dns zonelist kcrb.local;
+# TOOL dns add kcrb.local kcrb.local test A 192.168.1.100;
+# TOOL dns delete kcrb.local kcrb.local test A 192.168.1.100;
+
+# ─── OU ──────────────────────────────────────────────────────
+TOOL ou list;
+# TOOL ou create "NewOU" --base-dn="DC=kcrb,DC=local";
+
+# ─── GPO ─────────────────────────────────────────────────────
+# TOOL gpo listall;
+# TOOL gpo list "DC=kcrb,DC=local";
+# TOOL gpo create "Новая политика";
+
+# ─── Домен ───────────────────────────────────────────────────
+# TOOL domain info;
+# TOOL domain level show;
+# TOOL domain passwordsettings show;
+# TOOL domain exportkeytab /tmp/krb5.keytab;
+
+# ─── FSMO ────────────────────────────────────────────────────
+TOOL fsmo show;
+# TOOL fsmo transfer --role=rid;
+# TOOL fsmo seize --role=pdc;
+
+# ─── Сайты ───────────────────────────────────────────────────
+# TOOL sites list;
+
+# ─── Репликация ──────────────────────────────────────────────
+# TOOL drs showrepl;
+# TOOL drs kcc;
+# TOOL drs repl --all;
+
+# ─── SPN ─────────────────────────────────────────────────────
+# TOOL spn list Administrator;
+# TOOL spn add HTTP/server.kcrb.local Administrator;
+
+# ─── Делегирование ───────────────────────────────────────────
+# TOOL delegation show Administrator;
+
+# ─── NTACL ───────────────────────────────────────────────────
+# TOOL ntacl sysvolcheck;
+
+# ─── Схема ───────────────────────────────────────────────────
+# TOOL schema query;
+
+# ─── Проверка базы ──────────────────────────────────────────
+TOOL dbcheck;
+# TOOL dbcheck --fix --yes;
+
+# ─── Справка ─────────────────────────────────────────────────
+TOOL LIST;
+TOOL HELP user;

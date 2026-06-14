@@ -1,0 +1,23 @@
+# ═══════════════════════════════════════════════════════════════
+# Пример SDB скрипта: ID маппинг и реестр
+# ═══════════════════════════════════════════════════════════════
+
+# Маппинг SID → UID/GID
+USE idmap;
+
+FORMAT table;
+FIELDS cn, objectSid, xidNumber, type;
+
+SELECT * FROM *;
+
+# Экспорт маппингов
+FORMAT csv;
+OUTPUT /tmp/samba_idmap.csv;
+
+# Реестр HKLM
+USE hklm;
+
+FORMAT table;
+LIMIT 20;
+
+SELECT dn, key, value, data, type FROM *;

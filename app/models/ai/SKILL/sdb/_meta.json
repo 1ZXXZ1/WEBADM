@@ -1,0 +1,10 @@
+{
+    "name": "sdb",
+    "version": "1.0.0",
+    "description": "SDB - Samba Database Query Tool. Direct LDB access, SQL-like queries, one-step export.",
+    "tool_name": "sdb_execute",
+    "priority": "high",
+    "categories": ["database", "query", "export", "schema-analysis"],
+    "replaces_steps": ["ldbsearch_ad", "data_import", "data_transform", "data_export", "execute_shell_command"],
+    "one_step_capable": true
+}
