@@ -1,95 +1,175 @@
 # Samba AD DC Management API — Complete Documentation
 
-> **Version:** api_v1.9.6-7  
+> **Version:** pr-a.1.3 (api_v2.8 baseline)
+> **Server file:** `app/main.py` (`FastAPI(version="pr-a.1.2")`)
+> **Base URL:** `https://<host>:<port>` (HTTPS by default — see [Transport (HTTP/HTTPS)](#transport--httphttps) below)
+> **Default port:** `8099`
+> **Total endpoints:** 382 (174 GET, 139 POST, 23 PUT, 37 DELETE, 2 PATCH, 7 WebSocket)
 
 ## Table of Contents
 
 1. [Overview](#overview)
-2. [Authentication](#authentication)
-3. [Authorization & Permissions](#authorization--permissions)
-4. [Rate Limiting](#rate-limiting)
-5. [Caching](#caching)
-6. [Pagination](#pagination)
-7. [Error Handling](#error-handling)
-8. [WebSocket Real-Time Notifications](#websocket-real-time-notifications)
-9. [Configuration (Environment Variables)](#configuration)
-10. [System Endpoints](#system-endpoints)
-11. [Authentication Endpoints](#authentication-endpoints)
-12. [User Management](#user-management)
-13. [User Extended Management](#user-extended-management)
-14. [Group Management](#group-management)
-15. [Computer Management](#computer-management)
-16. [Contact Management](#contact-management)
-17. [Organizational Unit Management](#organizational-unit-management)
-18. [OU Extended Management](#ou-extended-management)
-19. [Domain Management](#domain-management)
-20. [DNS Management](#dns-management)
-21. [Group Policy (GPO) Management](#group-policy-gpo-management)
-22. [FSMO Roles](#fsmo-roles)
-23. [DRS Replication](#drs-replication)
-24. [Sites & Subnets](#sites--subnets)
-25. [Schema](#schema)
-26. [Delegation](#delegation)
-27. [Service Accounts](#service-accounts)
-28. [Authentication Policies](#authentication-policies)
-29. [Miscellaneous Operations](#miscellaneous-operations)
-30. [Shell Execution](#shell-execution)
-31. [Shell Project](#shell-project)
-32. [Batch Operations](#batch-operations)
-33. [AI Assistant](#ai-assistant)
-34. [Management API (Admin Panel)](#management-api-admin-panel)
-35. [Dashboard](#dashboard)
-36. [Task Management](#task-management)
-37. [Data Models Reference](#data-models-reference)
-38. [Permissions Reference](#permissions-reference)
+2. [Transport (HTTP/HTTPS)](#transport--httphttps)
+3. [Authentication](#authentication)
+4. [Authorization & Permissions](#authorization--permissions)
+5. [Rate Limiting](#rate-limiting)
+6. [Caching](#caching)
+7. [Pagination](#pagination)
+8. [Error Handling](#error-handling)
+9. [WebSocket Real-Time Notifications](#websocket-real-time-notifications)
+10. [Configuration (Environment Variables)](#configuration)
+11. [System Endpoints](#system-endpoints)
+12. [Authentication Endpoints](#authentication-endpoints)
+13. [2FA / TOTP](#2fa--totp)
+14. [User Management](#user-management)
+15. [User Extended Management](#user-extended-management)
+16. [Group Management](#group-management)
+17. [Computer Management](#computer-management)
+18. [Contact Management](#contact-management)
+19. [Organizational Unit Management](#organizational-unit-management)
+20. [OU Extended Management](#ou-extended-management)
+21. [Domain Management](#domain-management)
+22. [DNS Management](#dns-management)
+23. [Group Policy (GPO) Management](#group-policy-gpo-management)
+24. [FSMO Roles](#fsmo-roles)
+25. [DRS Replication](#drs-replication)
+26. [Sites & Subnets](#sites--subnets)
+27. [Schema](#schema)
+28. [Delegation](#delegation)
+29. [Service Accounts](#service-accounts)
+30. [Authentication Policies & Silos](#authentication-policies--silos)
+31. [Miscellaneous Operations](#miscellaneous-operations)
+32. [Shell Execution](#shell-execution)
+33. [Shell Project](#shell-project)
+34. [Batch Operations](#batch-operations)
+35. [AI Assistant](#ai-assistant)
+36. [Chat (REST + WebSocket)](#chat-rest--websocket)
+37. [Management API (Admin Panel)](#management-api-admin-panel)
+38. [Ban Management](#ban-management)
+39. [Webhooks](#webhooks)
+40. [Backup](#backup)
+41. [Dashboard & Charts](#dashboard--charts)
+42. [SDB (Samba Database Query)](#sdb-samba-database-query)
+43. [Report Generation](#report-generation)
+44. [Runtime Configuration (CFG)](#runtime-configuration-cfg)
+45. [Live Events (SSE)](#live-events-sse)
+46. [Audit Export](#audit-export)
+47. [Task Management](#task-management)
+48. [Data Models Reference](#data-models-reference)
+49. [Permissions Reference](#permissions-reference)
 
 ---
 
 ## Overview
 
-The Samba AD DC Management API is a RESTful web service that provides comprehensive administration capabilities for Samba Active Directory Domain Controllers via `samba-tool` and direct `ldbsearch`/SamDB API calls. It exposes 230+ endpoints covering every aspect of AD management: users, groups, computers, contacts, OUs, DNS, GPO, DRS replication, FSMO roles, schema, delegation, service accounts, authentication policies, AI assistant with agent tool calls, shell project workspace, batch operations, and more.
+The Samba AD DC Management API (codename **WebADC / apiadc**) is a RESTful web service that provides comprehensive administration capabilities for Samba Active Directory Domain Controllers via `samba-tool`, direct `ldbsearch` / SamDB API calls, and PostgreSQL-backed management tables. It exposes **382 endpoints** across **41 routers** covering every aspect of AD management: users, groups, computers, contacts, OUs, DNS, GPO, DRS replication, FSMO roles, schema, delegation, service accounts, authentication policies, AI assistant with agent tool calls, persistent chat with file attachments and audio calls, shell project workspaces, batch operations, real-time WebSocket/SSE notifications, webhooks, audit log export, and more.
 
 ### Key Features
 
-- **Dual Authentication**: Supports both static API keys (`X-API-Key` header) and JWT Bearer tokens (`Authorization: Bearer <token>`)
-- **Fast Read Path**: Read endpoints use `ldbsearch` (direct LDB/TDB access) instead of `samba-tool` for 10-100x faster queries
-- **Direct SamDB Writes**: Write operations attempt direct SamDB API calls first (fast path ~1-2s), falling back to `samba-tool` subprocess
-- **Granular RBAC**: 150+ individual permissions organized by resource category, with 3 built-in roles (admin, operator, auditor) and custom role support
-- **Rate Limiting**: Per-IP and per-user sliding window rate limits for auth, read, write, and shell project endpoints
+- **Dual Authentication**: Supports both static / DB-backed API keys (`X-API-Key` header) and JWT Bearer tokens (`Authorization: Bearer <token>`)
+- **HTTPS by default**: TLS termination is built into uvicorn via `SAMBA_SSL_CERTFILE` / `SAMBA_SSL_KEYFILE` — no reverse proxy required
+- **Fast Read Path**: Read endpoints use `ldbsearch` (direct LDB/TDB access) instead of `samba-tool` for 10–100× faster queries (`/full` and `/overview` endpoints)
+- **Direct SamDB Writes**: Write operations attempt direct SamDB API calls first (fast path ~1–2s), falling back to `samba-tool` subprocess
+- **Granular RBAC**: 150+ individual permissions organized by resource category, with 3 built-in roles (`admin`, `operator`, `auditor`) and custom role support
+- **Rate Limiting**: Per-IP and per-user sliding window rate limits for auth, read, write, and shell-project endpoints
 - **Response Caching**: Configurable TTL-based response cache with automatic invalidation on write operations
 - **Background Tasks**: Long-running operations (backup, GPO restore, dbcheck, etc.) run as background tasks with polling and WebSocket notifications
 - **Batch Operations**: Execute multi-step sequential operations with template resolution and rollback support
-- **Shell Project**: Workspace-based command execution environment with archive upload, scheduling, snapshots, and webhook callbacks
-- **AI Assistant**: Polza.ai-powered AI for natural language task building and direct API execution via agent tool calls, with persistent chat sessions
+- **Shell Project**: Workspace-based command execution environment with archive upload, scheduling, snapshots, audit log, templates, and webhook callbacks
+- **AI Assistant**: Polza.ai-powered AI for natural language task building and direct API execution via agent tool calls, with persistent chat sessions, SSE streaming, and pipeline templates
+- **Chat System**: Real-time chat with rooms, members, file attachments, voice messages, audio calls, reactions, stars, pins, scheduled messages, and full-text search
+- **2FA / TOTP**: Optional two-factor authentication with admin override and self-service setup
+- **Ban System**: Per-user and per-API-key bans with reasons, expiry, and history
+- **Webhooks**: Outbound webhook delivery for auth events, user lifecycle, and other system events
+- **Audit Export**: Export full audit log to CSV or XLSX
 - **Prometheus Metrics**: Built-in lightweight HTTP metrics (request counts, duration histograms) without external dependencies
 - **Structured Logging**: JSON or standard log format with request ID tracking
-- **Audit Trail**: Full action audit logging via management database
+- **Audit Trail**: Full action audit logging via PostgreSQL management database
 
-### Changelog (v1.9.6-5 to v1.9.6-7)
+### Recent changelog (highlights)
 
-#### v1.9.6-5 — Bug Fixes
-- **DNS**: `_is_transient_dns_error()` now excludes STATUS_OBJECT_NAME_NOT_FOUND patterns — prevents 4+ minute retry loops on non-existent RPC server hostnames
-- **GPO**: Device Timeout errors (STATUS_DEVICE_TIMEOUT) now return HTTP 504 immediately instead of HTTP 507, preventing unnecessary retry cascading
-- **Domain Level**: Pydantic validator added to `DomainLevelSetRequest` — rejects invalid values like `"NEXT_LEVEL"`, restricting to: 2000, 2003, 2008, 2008_R2, 2012, 2012_R2, 2016
-- **Rate Limiting**: Write limit increased from 30 to 60 req/min; 429 responses no longer count toward the rate counter
-- **DRS**: Device Timeout errors now return HTTP 504 instead of HTTP 502
+- **pr-a.1.2** — Current production build. WebADC SPA mounted at `/` on the same port as the API (no separate web service). HTTPS enabled by default. AI Agent with shell execution and Polza.ai integration. Chat REST + WebSocket with calls. 2FA + admin 2FA endpoints. Ban system.
+- **v2.8** — Batch operations with rollback, granular per-permission RBAC inside JWT tokens
+- **v2.7** — JWT auth, rate limiting, caching, pagination, WebSocket, Prometheus metrics, structured logging, CSV import/export, OU tree, system stats, user/API-key management
+- **v2.4** — Chat REST + WebSocket, file attachments, voice messages
+- **v2.3** — 2FA / TOTP, webhooks, SSE live events, shell WebSocket, audit enrichment
+- **v2.0.4** — `WEB_ENABLED=false` enforcement middleware (defense-in-depth)
+- **v2.0.1** — WebADC SPA at root `/`, combined auth middleware
+- **v1.6.7** — Shell Project: scheduling, snapshots, audit log, templates, owner transfer, tags
+- **v1.6.4** — Shell Project workspace
+- **v1.6.8-1** — AI Assistant
+- **v1.4.3** — Shell execution router
+- **v1.2.7_ban** — Ban system (mgmt_bans table)
+- **v1.2.1_fix** — Fast ldbsearch-based `/full` and `/dashboard` endpoints
 
-#### v1.9.6-6 — Test Suite Improvements
-- **api_debug.py**: Added batch endpoint test (`POST /api/v1/batch`) with full lifecycle validation (create user+group+member, list, cleanup)
-- **api_debug.py**: 429 rate-limit auto-retry with exponential backoff (max 2 retries) prevents cascading test failures
-- **api_debug.py**: 1.5s delay between write operations to avoid rate limiting
-- **debug_batch.py**: Timeout increased from 180s to 300s; 1.0s pre-request delay; retry-enabled HTTP requests
+---
 
-#### v1.9.6-7 — Documentation & AI Skills
-- **API_DOCUMENTATION.md**: Updated to v1.9.6-7 with full changelog
-- **AI Skills API Documentation**: Created per-module skill documents for the AI Assistant agent, covering all 19 API modules with endpoint summaries, parameter references, and usage examples
-- **Rate Limiting**: Documented that write rate limit is now 60 req/min (was 30)
+## Transport (HTTP/HTTPS)
+
+The server supports both HTTP and HTTPS. The mode is selected automatically by `run.sh` based on the `SAMBA_SSL_CERTFILE` and `SAMBA_SSL_KEYFILE` environment variables. **Production deployments use HTTPS.**
+
+### HTTPS configuration (default in shipped `.env`)
+
+```bash
+# /etc/webadc/.env  (or local .env)
+SAMBA_SSL_CERTFILE=/etc/pki/tls/certs/apiadc.crt
+SAMBA_SSL_KEYFILE=/etc/pki/tls/private/apiadc.key
+# SAMBA_SSL_KEYFILE_PASSWORD=           # only for encrypted keys
+# SAMBA_SSL_CA_CERTS=/etc/pki/tls/certs/ca-bundle.crt
+# SAMBA_SSL_VERSION=                    # blank = uvicorn default (TLSv1.2+)
+```
+
+When both files exist and are readable, `run.sh` launches uvicorn with:
+
+```bash
+uvicorn app.main:app \
+  --host 0.0.0.0 --port 8099 \
+  --ssl-certfile /etc/pki/tls/certs/apiadc.crt \
+  --ssl-keyfile  /etc/pki/tls/private/apiadc.key
+```
+
+### Plain HTTP mode
+
+If `SAMBA_SSL_CERTFILE` / `SAMBA_SSL_KEYFILE` are **not set** (or empty), `run.sh` starts uvicorn without `--ssl-*` flags — the server then serves plain HTTP. This is intended for local development only.
+
+### All curl examples in this document use HTTPS
+
+```bash
+# Health (no auth)
+curl -k https://127.0.0.1:8099/health
+
+# API request
+curl -k -H "X-API-Key: YOUR_KEY" https://127.0.0.1:8099/api/v1/users/
+```
+
+> Use `-k` (or `--insecure`) for self-signed certificates. For production, install the CA bundle on the client and drop `-k`.
+
+### Swagger UI / ReDoc
+
+Both are served by the same uvicorn process, so they are accessible over HTTPS:
+
+- **Swagger UI:** `https://127.0.0.1:8099/docs`
+- **ReDoc:** `https://127.0.0.1:8099/redoc`
+- **OpenAPI JSON:** `https://127.0.0.1:8099/openapi.json`
+
+### WebADC web panel
+
+The web panel (Next.js SPA) is served at the **root** `/` on the same port as the API. There is also a `/web/` mount that exposes a reverse proxy sub-app (`/web/api/v1/*` → backend API). Both are available over HTTPS when SSL is enabled.
+
+```
+https://127.0.0.1:8099/                  # WebADC SPA
+https://127.0.0.1:8099/web/              # WebADC sub-app (reverse proxy)
+https://127.0.0.1:8099/web/api/health    # WebADC health
+https://127.0.0.1:8099/web/api/v1/users/ # Proxied API call
+```
+
+Set `WEB_ENABLED=false` in `.env` to disable the web panel entirely (only the API keeps working — all non-API paths return 404).
 
 ---
 
 ## Authentication
 
-All endpoints (except public paths) require authentication. Two methods are supported:
+All endpoints (except public paths) require authentication. Two methods are supported and may be combined in the same request.
 
 ### API Key Authentication
 
@@ -97,24 +177,39 @@ Include the `X-API-Key` header with every request:
 
 ```http
 GET /api/v1/users/ HTTP/1.1
+Host: 127.0.0.1:8099
 X-API-Key: your-api-key-here
 ```
 
-API keys are validated against:
-1. **Management Database** (api_ma) — keys created via `POST /api/v1/mgmt/keys`, with associated roles and permissions
-2. **Static API Key** — the `SAMBA_API_KEY` environment variable (always has `admin` role)
+API keys are validated against (in order):
+
+1. **Management Database** (`mgmt_users` + `mgmt_api_keys` tables, PostgreSQL) — keys created via `POST /api/v1/mgmt/keys`, with associated roles, permissions, expiry, and disable flags
+2. **Static API Key** — the `SAMBA_API_KEY` environment variable (always has `admin` role, cannot be banned)
 
 ### JWT Bearer Authentication
 
 First obtain tokens via login, then include the access token:
 
 ```http
-POST /api/v1/auth/login
+POST /api/v1/auth/login HTTP/1.1
 Content-Type: application/json
 
 {
   "username": "admin",
   "password": "your-password"
+}
+```
+
+Response (no 2FA enabled):
+
+```json
+{
+  "access_token": "eyJhbGciOiJIUzI1NiIs...",
+  "refresh_token": "eyJhbGciOiJIUzI1NiIs...",
+  "token_type": "bearer",
+  "expires_in": 1800,
+  "role": "admin",
+  "permissions": ["user.create", "user.list", "..."]
 }
 ```
 
@@ -125,20 +220,43 @@ GET /api/v1/users/ HTTP/1.1
 Authorization: Bearer eyJhbGciOiJIUzI1NiIs...
 ```
 
+If 2FA is enabled for the user, the login response is `200` with `{ "totp_required": true, "temp_token": "...", "expires_in": 300 }` and you must complete step 2 via `POST /api/v1/auth/login/verify`. See [2FA / TOTP](#2fa--totp).
+
 ### Public Endpoints (No Authentication Required)
 
 | Path | Description |
 |------|-------------|
+| `GET /` | WebADC SPA entry point |
 | `GET /health` | Basic health check |
 | `GET /health/detailed` | Detailed health check |
 | `GET /metrics` | Prometheus metrics |
 | `GET /docs` | Swagger UI |
 | `GET /openapi.json` | OpenAPI schema |
 | `GET /redoc` | ReDoc documentation |
-| `POST /api/v1/auth/login` | JWT login |
+| `GET /web/api/health` | WebADC panel health |
+| `POST /api/v1/auth/login` | JWT login (step 1) |
 | `POST /api/v1/auth/refresh` | JWT token refresh |
-| `POST /api/v1/auth/check` | Credential verification |
-| `/ws/*` | WebSocket endpoints |
+| `POST /api/v1/auth/check` | Credential verification (any of 3 methods) |
+| `POST /api/v1/auth/login/verify` | 2FA login step 2 (temp_token + TOTP code) |
+| `GET /api/v1/auth/test` | Full credential diagnostic (always 200) |
+| `/_next/*`, `/locales/*`, `/favicon*`, `/robots.txt` | WebADC static assets |
+| `/ws/*` | WebSocket endpoints (auth handled per-endpoint) |
+
+### Disabled account / key handling
+
+The auth middleware detects the following conditions and returns a clear error code in the response body:
+
+| Condition | HTTP | `code` | Message |
+|-----------|------|--------|---------|
+| User account disabled | 403 | `ACCOUNT_DISABLED` | Account 'X' is disabled |
+| API key deactivated | 403 | `KEY_DISABLED` | This API key is deactivated |
+| Role disabled | 403 | `ROLE_DISABLED` | Role 'X' is disabled |
+| API key expired | 401 | `KEY_EXPIRED` | This API key has expired |
+| User banned | 403 | — | User 'X' is banned: <reason> (<expiry>) |
+| API key banned | 403 | — | API key 'XXX…' is banned |
+| Invalid API key | 401 | `INVALID_API_KEY` | Invalid API key |
+| Invalid/expired JWT | 401 | `INVALID_JWT` | Invalid or expired JWT token |
+| No authentication provided | 401 | `AUTH_REQUIRED` | Missing authentication |
 
 ---
 
@@ -150,202 +268,196 @@ The API implements granular role-based access control (RBAC) with 150+ individua
 
 | Role | Description | Access Level |
 |------|-------------|-------------|
-| `admin` | Full system access | All 150+ permissions |
-| `operator` | Read-only operations | All read permissions (list, show, get, full endpoints) |
+| `admin` | Full system access | All permissions, including ban.* and 2FA admin endpoints |
+| `operator` | Read-mostly operations | All read permissions + most write operations |
 | `auditor` | Read + audit log access | Read permissions + `mgmt.audit.view` |
 
 ### Permission Format
 
 Permissions follow the `resource.action` format, for example:
+
 - `user.create` — Create user accounts
 - `group.list` — List groups
 - `dns.recordcreate` — Create DNS records
 - `mgmt.users.create` — Create management users
 - `shell.execute` — Execute shell commands
+- `ban.create` — Create a ban (admin only)
+- `chat.room.create` — Create a chat room
+- `ai.agent.execute` — Run the AI agent
 
-Custom roles can be created and assigned any combination of permissions via the Management API.
+Custom roles can be created and assigned any combination of permissions via `POST /api/v1/mgmt/roles` and `POST /api/v1/mgmt/permissions/assign`.
 
 ### Permission Enforcement
 
-1. The combined auth middleware validates authentication (API key or JWT)
-2. The role is extracted from the JWT payload or API key metadata
-3. `has_permission(role, method, path)` checks the role's permissions against the required permission
-4. If the role lacks the required permission, HTTP 403 is returned with the missing permission name
+1. The combined auth middleware validates authentication (API key or JWT).
+2. The role is extracted from the JWT payload or API key metadata.
+3. `has_permission(role, method, path)` checks the role's permissions against the required permission resolved from the request method + path (`app.permissions.resolve_permission`).
+4. If the role lacks the required permission, HTTP 403 is returned with the missing permission name in the message: `Role 'X' does not have permission for POST /api/v1/users/ (requires: user.create)`.
+5. If a JWT user or API key owner is currently banned (per `mgmt_bans` table), HTTP 403 is returned with the ban reason and expiry.
 
 ---
 
 ## Rate Limiting
 
-Rate limits are enforced via in-memory sliding window counters:
+Rate limits are enforced via in-memory sliding window counters. The middleware is registered in `app/main.py` (`RateLimitMiddleware`).
 
 | Endpoint Group | Default Limit | Scope | Environment Variable |
 |---------------|--------------|-------|---------------------|
 | Auth (`/api/v1/auth/*`) | 10 req/min | Per IP | `SAMBA_RATE_LIMIT_AUTH_PER_MIN` |
 | Shell Project (`/api/v1/shell/projet/*`) | 120 req/min | Per user | `SAMBA_RATE_LIMIT_SHELL_PROJET_PER_MIN` |
 | Read (GET) | 100 req/min | Per user | `SAMBA_RATE_LIMIT_READ_PER_MIN` |
-| Write (POST/PUT/DELETE/PATCH) | 60 req/min | Per user | `SAMBA_RATE_LIMIT_WRITE_PER_MIN` |
+| Write (POST/PUT/DELETE/PATCH) | 30 req/min | Per user | `SAMBA_RATE_LIMIT_WRITE_PER_MIN` |
+| Per-user override (0 = disabled) | 0 req/min | Per user | `SAMBA_RATE_LIMIT_PER_USER_PER_MIN` |
+| Window size | 60 s | — | `SAMBA_RATE_LIMIT_WINDOW_SECONDS` |
+| Enable/disable | `true` | — | `SAMBA_RATE_LIMIT_ENABLED` |
 
-When rate limited, the API returns HTTP 429 with a `Retry-After` header.
+When rate limited, the API returns HTTP 429 with a `Retry-After` header. 429 responses are **not** counted toward the rate counter.
 
-Exempt paths: `/health`, `/docs`, `/openapi.json`, `/redoc`, and `OPTIONS` requests.
+Exempt paths: `/health`, `/health/detailed`, `/metrics`, `/docs`, `/openapi.json`, `/redoc`, `/web/api/health`, `OPTIONS` requests.
 
 ---
 
 ## Caching
 
-The API uses an in-memory TTL-based response cache:
+The API uses an in-memory TTL-based response cache (`app.cache`):
 
 | Setting | Default | Environment Variable |
 |---------|---------|---------------------|
-| Cache enabled | `true` | `SAMBA_CACHE_ENABLED` |
-| Default TTL | 3 seconds | `SAMBA_CACHE_TTL` |
-| Max cache size | 512 entries | `SAMBA_CACHE_MAX_SIZE` |
+| Cache enabled | `false` (production) | `SAMBA_CACHE_ENABLED` |
+| Cache TTL | 0 s (disabled) | `SAMBA_CACHE_TTL` |
+| Cache max size | 512 entries | `SAMBA_CACHE_MAX_SIZE` |
 
-**Cache invalidation** is automatic on all write operations (POST, PUT, DELETE, PATCH). The cache middleware invalidates both the response cache and the `ldb_reader` internal cache so subsequent reads return fresh data.
-
-**ldbsearch `/full` endpoints** cache results for 30 seconds. DNS server info caches for 300 seconds.
+On every write operation (POST/PUT/DELETE/PATCH), the `cache_middleware` calls `cache.invalidate_for_write(path)` and also invalidates the `ldb_reader` internal cache so subsequent `/full` reads return fresh data.
 
 ---
 
 ## Pagination
 
-Paginated endpoints accept the following query parameters:
+List endpoints support standard offset/limit pagination:
 
-| Parameter | Type | Default | Max | Description |
-|-----------|------|---------|-----|-------------|
-| `offset` | int | 0 | — | Zero-based index of the first item |
-| `limit` | int | 100 | 1000 | Maximum number of items per page |
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `limit` | 100 | Max items per page (capped per endpoint) |
+| `offset` | 0 | Skip first N items |
+| `search` | — | Substring filter (where supported) |
+| `sort` | — | Sort field (where supported) |
 
-**Response format:**
+Responses are wrapped in:
 
 ```json
 {
   "status": "ok",
-  "message": "Found 150 users",
-  "items": [...],
-  "total": 150,
+  "total": 1234,
+  "limit": 100,
   "offset": 0,
-  "limit": 100
+  "items": [ ... ]
 }
 ```
-
-### Search Parameters
-
-Search endpoints accept additional parameters:
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `search` | string | Simple substring search (auto-wrapped as LDAP filter) |
-| `filter` | string | Raw LDAP filter expression, e.g. `(sAMAccountName=john*)` |
-| `attributes` | string | Comma-separated list of LDAP attributes to return |
 
 ---
 
 ## Error Handling
 
-All errors follow a consistent JSON format:
+All errors return a standardised JSON envelope:
 
 ```json
 {
   "status": "error",
-  "message": "Human-readable error description",
-  "details": "Optional additional context (only in DEBUG mode)"
+  "message": "описание ошибки",
+  "details": "дополнительная информация (опционально)"
 }
 ```
 
-### HTTP Status Codes
+HTTP status codes:
 
 | Code | Meaning |
 |------|---------|
-| 400 | Bad Request — invalid input parameters |
-| 401 | Unauthorized — missing or invalid authentication |
-| 403 | Forbidden — insufficient permissions |
-| 404 | Not Found — resource does not exist |
-| 409 | Conflict — resource already exists |
-| 412 | Precondition Failed — operation not applicable for server role |
-| 422 | Unprocessable Entity — semantic validation error |
-| 429 | Too Many Requests — rate limit exceeded |
-| 500 | Internal Server Error |
-| 504 | Gateway Timeout — operation timed out |
-| 507 | Insufficient Storage — STATUS_QUOTA_EXCEEDED (DRS/GPO) |
+| 400 | Bad request — invalid input, validation error |
+| 401 | Authentication missing or invalid |
+| 403 | Authenticated but not authorised (RBAC / ban / disabled) |
+| 404 | Resource not found |
+| 409 | Conflict (duplicate, dependency, locked) |
+| 429 | Rate limit exceeded |
+| 500 | Internal server error |
+| 502 | Bad gateway (WebADC reverse proxy cannot reach backend) |
+| 503 | Service unavailable (DB pool failure, dependency not initialised) |
+| 504 | Timeout (samba-tool, RPC, or DRS device timeout) |
+| 507 | Insufficient storage |
+
+Custom exception handlers are registered for `SambaToolError`, `RuntimeError`, `TimeoutError`, `ValueError`, and a generic `Exception` catch-all. The classifier `classify_samba_error()` maps common samba-tool error patterns to the most appropriate HTTP code (e.g. `STATUS_OBJECT_NAME_NOT_FOUND` → 404, `STATUS_DEVICE_TIMEOUT` → 504, `STATUS_ACCESS_DENIED` → 403).
 
 ---
 
 ## WebSocket Real-Time Notifications
 
-### Task Status Updates
+The server exposes 7 WebSocket endpoints for real-time updates. All accept text `ping` messages and respond with `{"type": "pong"}` to keep the connection alive. Auth is **not** required at the WS upgrade (auth is per-event for tasks/projets; chat requires the user to be a room member).
 
-Connect to receive real-time updates on background task status:
+| Endpoint | Description |
+|----------|-------------|
+| `wss://host:8099/ws/tasks/{task_id}` | Status updates for a single background task |
+| `wss://host:8099/ws/tasks` | All task updates (dashboard) |
+| `wss://host:8099/ws/projet/{projet_id}` | Real-time stdout/stderr/status for a shell project execution |
+| `wss://host:8099/ws/projet` | All project events (dashboard) |
+| `wss://host:8099/ws/live` | Real-time user/key/role events for the management dashboard |
+| `wss://host:8099/ws/shell` | Real-time shell command execution (stdin/stdout/stderr streaming) |
+| `wss://host:8099/ws/chat/{room_id}` | Real-time chat in a specific room (messages, reactions, edits, typing, calls) |
 
-```
-ws://<host>:8099/ws/tasks/{task_id}
-```
-
-Messages are JSON objects with task status changes. Send `"ping"` to keep the connection alive (receives `{"type": "pong"}`).
-
-### All Tasks Dashboard
-
-Monitor all task updates:
-
-```
-ws://<host>:8099/ws/tasks
-```
-
-Receives an initial `tasks_snapshot` message with all current tasks, then incremental updates.
-
-### Shell Project Output
-
-Receive real-time stdout/stderr during project command execution:
-
-```
-ws://<host>:8099/ws/projet/{projet_id}
-```
-
-Message types: `output` (stdout/stderr chunk), `status` (project status change), `command_result` (final result), `extract_result` (archive extraction).
+> When SSL is enabled, use `wss://`. When plain HTTP, use `ws://`.
 
 ---
 
 ## Configuration
 
-All settings are loaded from environment variables with the `SAMBA_` prefix (e.g. `SAMBA_API_HOST`, `SAMBA_API_PORT`). A `.env` file is also supported.
+All configuration is read from environment variables (loaded from `.env` via pydantic-settings). The settings model is in `app/config.py`. Hot-reload is supported at runtime via the `/api/v1/cfg/*` endpoints (see [Runtime Configuration (CFG)](#runtime-configuration-cfg)).
 
-### Server Settings
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `SAMBA_API_HOST` | `127.0.0.1` | Host address to bind |
-| `SAMBA_API_PORT` | `8099` | Port to listen on |
-| `SAMBA_API_KEY` | **Required** | Static API key for authentication |
-| `SAMBA_LOG_LEVEL` | `INFO` | Logging level (DEBUG/INFO/WARNING/ERROR/CRITICAL) |
-
-### Samba Tool Paths
+### Core server
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `SAMBA_TOOL_PATH` | `samba-tool` | Path to samba-tool binary |
-| `SAMBA_LDBSEARCH_PATH` | `ldbsearch` | Path to ldbsearch binary |
-| `SAMBA_SMB_CONF` | `/etc/samba/smb.conf` | Path to smb.conf |
-| `SAMBA_SERVER` | `localhost` | Default Samba server hostname |
-| `SAMBA_DC_HOSTNAME` | Auto-detected | Real DC hostname for RPC operations |
-| `SAMBA_REALM` | Auto-detected | Kerberos realm / DNS domain |
+| `SAMBA_API_KEY` | (required) | Static bootstrap admin API key (always `admin` role, cannot be banned) |
+| `SAMBA_API_HOST` | `127.0.0.1` | Bind address (production: `0.0.0.0`) |
+| `SAMBA_API_PORT` | `8099` | Listen port |
+| `TMPDIR` | `/var/tmp` | Temp dir for samba-tool |
+| `WEB_ENABLED` | `true` | Serve the WebADC SPA at `/` |
+| `WEB_STATIC_DIR` | `out` | Static asset directory for the SPA |
 
-### LDAP / Kerberos
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `SAMBA_LDAP_URL` | — | LDAP URL (e.g. `ldaps://dc1.example.com`) |
-| `SAMBA_LDAPI_URL` | — | LDAPI URL for local access (write operations) |
-| `SAMBA_TDB_URL` | Auto-detected | TDB URL for direct read-only sam.ldb access |
-| `SAMBA_DOMAIN_DN` | Auto-detected | Base DN (e.g. `DC=kcrb,DC=local`) |
-| `SAMBA_CREDENTIALS_USER` | — | Username for samba-tool `-U` flag |
-| `SAMBA_CREDENTIALS_PASSWORD` | — | Password for samba-tool `-U` flag |
-| `SAMBA_USE_KERBEROS` | `false` | Use Kerberos authentication |
-
-### JWT Authentication
+### SSL / HTTPS
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `SAMBA_JWT_SECRET_KEY` | Auto-generated | Secret for JWT signing |
+| `SAMBA_SSL_CERTFILE` | (empty) | Path to TLS certificate (PEM). When set + key set → HTTPS |
+| `SAMBA_SSL_KEYFILE` | (empty) | Path to TLS private key (PEM) |
+| `SAMBA_SSL_KEYFILE_PASSWORD` | (empty) | Password for encrypted private key |
+| `SAMBA_SSL_CA_CERTS` | (empty) | CA bundle path (for client cert verification) |
+| `SAMBA_SSL_VERSION` | (empty) | SSL/TLS version override |
+
+### Samba
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SAMBA_SERVER` | `localhost` | AD DC hostname (e.g. `dc1.almaz.local`) |
+| `SAMBA_TOOL_PATH` | `samba-tool` | Path to `samba-tool` binary |
+| `SAMBA_LDBSEARCH_PATH` | `ldbsearch` | Path to `ldbsearch` binary (fast reads) |
+| `SAMBA_SMB_CONF` | `/etc/samba/smb.conf` | Path to `smb.conf` |
+| `SAMBA_WORKER_POOL_SIZE` | `4` | `ProcessPoolExecutor` size for samba-tool |
+| `SAMBA_JSON_MODE` | `auto` | `auto` / `force_json` / `force_output_format` / `text` |
+| `SAMBA_CREDENTIALS_USER` | (empty) | Remote admin username |
+| `SAMBA_CREDENTIALS_PASSWORD` | (empty) | Remote admin password |
+| `SAMBA_USE_KERBEROS` | `false` | Use Kerberos instead of password |
+| `SAMBA_USE_SUDO` | `auto` | `auto` / `true` / `false` — wrap samba-tool in sudo |
+| `SAMBA_LDAP_URL` | (empty) | LDAP URL for remote access |
+| `SAMBA_LDAPI_URL` | (empty) | LDAPI unix-socket URL |
+| `SAMBA_TDB_URL` | (empty) | TDB URL |
+| `SAMBA_TDB_SAM_LDB_PATH` | (empty) | Direct path to `sam.ldb` |
+| `SAMBA_DOMAIN_DN` | (empty) | Domain DN (auto-detected if empty) |
+| `SAMBA_DC_HOSTNAME` | (empty) | DC hostname override |
+| `SAMBA_REALM` | (empty) | Kerberos realm |
+
+### JWT / Auth
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SAMBA_JWT_SECRET_KEY` | (auto) | JWT signing secret (auto-generated if empty) |
 | `SAMBA_JWT_ALGORITHM` | `HS256` | JWT signing algorithm |
 | `SAMBA_JWT_ACCESS_TOKEN_EXPIRE_MINUTES` | `30` | Access token TTL |
 | `SAMBA_JWT_REFRESH_TOKEN_EXPIRE_DAYS` | `7` | Refresh token TTL |
@@ -354,3200 +466,1407 @@ All settings are loaded from environment variables with the `SAMBA_` prefix (e.g
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `SAMBA_CORS_ORIGINS` | `*` (all origins) | Comma-separated allowed origins |
+| `SAMBA_CORS_ORIGINS` | (empty = `*`) | Comma-separated allowed origins |
 
-### Rate Limiting
+### Rate limiting
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `SAMBA_RATE_LIMIT_ENABLED` | `true` | Enable rate limiting |
-| `SAMBA_RATE_LIMIT_AUTH_PER_MIN` | `10` | Auth endpoint limit |
-| `SAMBA_RATE_LIMIT_READ_PER_MIN` | `100` | Read endpoint limit |
-| `SAMBA_RATE_LIMIT_WRITE_PER_MIN` | `60` | Write endpoint limit |
-| `SAMBA_RATE_LIMIT_SHELL_PROJET_PER_MIN` | `120` | Shell project limit |
+| `SAMBA_RATE_LIMIT_ENABLED` | `true` | Master toggle |
+| `SAMBA_RATE_LIMIT_AUTH_PER_MIN` | `10` | Auth requests per minute per IP |
+| `SAMBA_RATE_LIMIT_READ_PER_MIN` | `100` | GET requests per minute per user |
+| `SAMBA_RATE_LIMIT_WRITE_PER_MIN` | `30` | Write requests per minute per user |
+| `SAMBA_RATE_LIMIT_SHELL_PROJET_PER_MIN` | `120` | Shell-project requests per minute |
 | `SAMBA_RATE_LIMIT_WINDOW_SECONDS` | `60` | Sliding window size |
+| `SAMBA_RATE_LIMIT_PER_USER_PER_MIN` | `0` | Per-user global cap (0 = disabled) |
 
-### Cache
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `SAMBA_CACHE_ENABLED` | `true` | Enable response caching |
-| `SAMBA_CACHE_TTL` | `3` | Default TTL in seconds |
-| `SAMBA_CACHE_MAX_SIZE` | `512` | Maximum cached entries |
-
-### Worker Pool
+### Caching
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `SAMBA_WORKER_POOL_SIZE` | `4` | Max concurrent samba-tool processes |
+| `SAMBA_CACHE_ENABLED` | `false` | Enable response cache |
+| `SAMBA_CACHE_TTL` | `0` | Default TTL in seconds |
+| `SAMBA_CACHE_MAX_SIZE` | `512` | Max cached entries |
 
-### Shell Execution
+### Logging
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `SAMBA_SHELL_ENABLED` | `true` | Enable shell API |
-| `SAMBA_SHELL_SUDO_PASSWORD` | — | Password for sudo -S |
-| `SAMBA_SHELL_MAX_TIMEOUT` | `600` | Max command timeout (10-3600s) |
-| `SAMBA_SHELL_BLOCKED_COMMANDS` | `rm -rf /,...` | Blocked command patterns |
+| `SAMBA_LOG_LEVEL` | `INFO` | `DEBUG` / `INFO` / `WARNING` / `ERROR` |
+| `SAMBA_LOG_FORMAT` | `standard` | `standard` or `json` |
+
+### Database
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SAMBA_MGMT_DB_PATH` | `/var/lib/samba/api_mgmt.db` | Legacy SQLite path (currently unused — PostgreSQL is used) |
+| `SAMBA_SHELL_PROJET_PG_HOST` | `localhost` | PostgreSQL host |
+| `SAMBA_SHELL_PROJET_PG_PORT` | `5432` | PostgreSQL port |
+| `SAMBA_SHELL_PROJET_PG_DBNAME` | `samba_api` | Database name |
+| `SAMBA_SHELL_PROJET_PG_USER` | `samba_api` | Database user |
+| `SAMBA_SHELL_PROJET_PG_PASSWORD` | (empty) | Database password |
+| `SAMBA_SHELL_PROJET_PG_DSN` | (empty) | Override DSN (takes precedence over the above) |
+| `SAMBA_SHELL_PROJET_PG_POOL_MIN` | `2` | Min pool size |
+| `SAMBA_SHELL_PROJET_PG_POOL_MAX` | `10` | Max pool size |
+
+### Shell
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SAMBA_SHELL_ENABLED` | `true` | Enable shell execution endpoints |
+| `SAMBA_SHELL_SUDO_PASSWORD` | (empty) | Sudo password for elevated shell commands |
+| `SAMBA_SHELL_MAX_TIMEOUT` | `600` | Max command timeout (seconds) |
+| `SAMBA_SHELL_BLOCKED_COMMANDS` | `rm -rf /,mkfs.,dd if=,...` | Blocked command patterns |
 
 ### Shell Project
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `SAMBA_SHELL_PROJET_BASE_DIR` | `/home/AD-API-USER` | Base directory for workspaces |
-| `SAMBA_SHELL_PROJET_MAX_PROJECTS` | `100` | Max concurrent projects |
-| `SAMBA_SHELL_PROJET_MAX_ARCHIVE_SIZE` | `500` | Max archive size (MB) |
-| `SAMBA_SHELL_PROJET_POOL_SIZE` | `8` | Thread pool size for commands |
-| `SAMBA_SHELL_PROJET_DEFAULT_TIMEOUT` | `300` | Default command timeout (s) |
-| `SAMBA_SHELL_PROJET_PG_DSN` | — | PostgreSQL connection string |
-| `SAMBA_SHELL_PROJET_ENCRYPTION_KEY` | Auto-generated | Fernet key for encrypted env vars |
+| `SAMBA_SHELL_PROJET_BASE_DIR` | `/home/AD-API-USER` | Base directory for project workspaces |
+| `SAMBA_SHELL_PROJET_MAX_PROJECTS` | `100` | Max projects per system |
+| `SAMBA_SHELL_PROJET_MAX_ARCHIVE_SIZE` | `500` | Max upload size (MB) |
+| `SAMBA_SHELL_PROJET_ALLOWED_ARCHIVE_TYPES` | `.zip,.tar.gz,...` | Allowed archive extensions |
+| `SAMBA_SHELL_PROJET_POOL_SIZE` | `8` | Concurrent project execution pool |
+| `SAMBA_SHELL_PROJET_DEFAULT_TIMEOUT` | `300` | Default per-command timeout (s) |
+| `SAMBA_SHELL_PROJET_OWNER_DEFAULT` | `api-user` | Default project owner |
+| `SAMBA_SHELL_PROJET_MAX_OUTPUT_SIZE` | `5242880` | Max stdout+stderr size (bytes) |
+| `SAMBA_SHELL_PROJET_MAX_WORKSPACE_SIZE` | `500` | Max workspace size (MB) |
+| `SAMBA_SHELL_PROJET_TTL_CLEANUP_INTERVAL` | `30` | TTL cleanup interval (minutes) |
+| `SAMBA_SHELL_PROJET_CALLBACK_MAX_RETRIES` | `3` | Webhook callback retry count |
+| `SAMBA_SHELL_PROJET_ENCRYPTION_KEY` | (empty) | At-rest encryption key |
+| `SAMBA_SHELL_PROJET_SHARED_VOLUMES_DIR` | `/home/AD-API-USER/_shared` | Shared volumes directory |
 
 ### AI Assistant
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `SAMBA_POLZA_AI_URL` | — | Polza.ai API base URL (required) |
-| `SAMBA_POLZA_AI_KEY` | — | Polza.ai API key (required) |
-| `SAMBA_POLZA_AI_MODEL` | — | Polza.ai model name (optional) |
-| `SAMBA_AI_DEFAULT_MODEL` | `openai/gpt-oss-120b` | Default LLM model |
-| `SAMBA_AI_TEMPERATURE` | `0.7` | LLM temperature |
-| `SAMBA_AI_MAX_TOKENS` | `2046` | Max completion tokens |
-| `SAMBA_AI_AGENT_MAX_STEPS` | `10` | Max agent loop iterations |
-| `SAMBA_AI_AGENT_SHELL_ENABLED` | `true` | Allow agent shell execution |
-| `SAMBA_AI_AGENT_SHELL_TIMEOUT` | `30` | Agent shell command timeout |
-| `SAMBA_AI_FALLBACK_MODELS` | — | Comma-separated fallback models |
-| `SAMBA_AI_MAX_SCHEMA_CHARS` | `12000` | Max compressed schema size |
-| `SAMBA_AI_AGENT_MAX_MENU_CHARS` | `8000` | Max API menu chars in prompt |
-| `SAMBA_AI_CHAT_ENABLED` | `true` | Enable AI chat system |
-| `SAMBA_AI_PERMISSION_MODE` | `true` | Permission-based AI mode |
+| `SAMBA_AI_API_BASE` | (empty) | MUST be empty (in-memory openapi is used; self-reference causes loops) |
+| `SAMBA_AI_DEFAULT_MODEL` | `deepseek/deepseek-v4-flash` | Default model |
+| `SAMBA_AI_TEMPERATURE` | `0.7` | Sampling temperature |
+| `SAMBA_AI_MAX_TOKENS` | `64000` | Max output tokens (auto-clamped to 16384 by config.py) |
+| `SAMBA_AI_RATE_LIMIT_RETRIES` | `3` | Provider 429 retries |
+| `SAMBA_AI_RATE_LIMIT_MAX_WAIT` | `30` | Max wait between retries (s) |
+| `SAMBA_AI_FALLBACK_MODELS` | `z-ai/glm-4.7-flash,...` | Comma-separated fallback model list |
+| `SAMBA_AI_MAX_SCHEMA_CHARS` | `120000` | Max OpenAPI schema size sent to AI |
+| `SAMBA_AI_AGENT_MAX_STEPS` | `60` | Max agent steps |
+| `SAMBA_AI_AGENT_EXPORT_DIR` | `/home/AD-API-USER/ai-exports` | AI export dir |
+| `SAMBA_AI_AGENT_SHELL_ENABLED` | `true` | Allow agent to execute shell |
+| `SAMBA_AI_AGENT_SHELL_TIMEOUT` | `30` | Agent shell timeout (s) |
+| `SAMBA_AI_AGENT_SHELL_BLOCKED_CMDS` | `rm -rf /,...` | Blocked commands for agent |
+| `SAMBA_AI_AGENT_API_TIMEOUT` | `60` | Agent API call timeout (s) |
+| `SAMBA_AI_AGENT_MAX_MENU_CHARS` | `80000` | Max menu chars |
+| `SAMBA_AI_DEBUG` | `false` | Verbose AI debug logging |
+| `SAMBA_AI_DEBUG_MAX_CONTENT` | `3000` | Truncate debug content at N chars |
+| `SAMBA_AI_CHAT_ENABLED` | `true` | Enable AI chat sessions |
+| `SAMBA_AI_CHAT_MAX_HISTORY` | `100` | Max messages per session |
+| `SAMBA_AI_CHAT_MAX_PER_USER` | `100` | Max sessions per user |
+| `SAMBA_AI_MASK_ENABLED` | `true` | Mask PII before sending to AI |
+| `SAMBA_AI_MASK_FIELDS` | (empty) | Additional fields to mask |
+| `SAMBA_AI_MASK_RANGE_NOTATION` | `true` | Mask IP ranges like `192.168.1.0/24` |
+| `SAMBA_AI_PERMISSION_MODE` | `true` | Enforce RBAC on AI agent actions |
+| `SAMBA_AI_SKILLS_DIR` | `SKILL` | AI skills directory |
+| `SAMBA_AI_SKILLS_ENABLED` | `true` | Enable AI skills |
 
-### Polza.ai Provider Routing
+### AI — Polza.ai provider
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `SAMBA_POLZA_AI_PROVIDER_ONLY` | — | Only use these providers (comma-sep) |
-| `SAMBA_POLZA_AI_PROVIDER_ORDER` | — | Provider priority order (comma-sep) |
-| `SAMBA_POLZA_AI_PROVIDER_IGNORE` | — | Ignore these providers (comma-sep) |
+| `SAMBA_POLZA_AI_URL` | `https://polza.ai/api/v1` | Polza.ai API base URL |
+| `SAMBA_POLZA_AI_KEY` | (empty) | Polza.ai API key |
+| `SAMBA_POLZA_AI_MODEL` | `deepseek/deepseek-v4-flash` | Polza.ai model |
+| `SAMBA_POLZA_AI_PROVIDER_ONLY` | (empty) | Restrict to specific providers |
+| `SAMBA_POLZA_AI_PROVIDER_ORDER` | (empty) | Provider ordering |
+| `SAMBA_POLZA_AI_PROVIDER_IGNORE` | (empty) | Providers to ignore |
 | `SAMBA_POLZA_AI_PROVIDER_ALLOW_FALLBACKS` | `true` | Allow provider fallbacks |
-| `SAMBA_POLZA_AI_PROVIDER_SORT` | — | Sort strategy (price) |
-| `SAMBA_POLZA_AI_PROVIDER_MAX_PRICE_PROMPT` | `0` | Max prompt price (RUB/million) |
-| `SAMBA_POLZA_AI_PROVIDER_MAX_PRICE_COMPLETION` | `0` | Max completion price (RUB/million) |
-
-### Polza.ai Reasoning
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `SAMBA_POLZA_AI_REASONING_EFFORT` | — | Reasoning effort (xhigh/high/medium/low/minimal/none) |
-| `SAMBA_POLZA_AI_REASONING_SUMMARY` | — | Reasoning summary (auto/concise/detailed) |
+| `SAMBA_POLZA_AI_PROVIDER_SORT` | (empty) | Provider sort strategy |
+| `SAMBA_POLZA_AI_PROVIDER_MAX_PRICE_PROMPT` | `50` | Max price per prompt token |
+| `SAMBA_POLZA_AI_PROVIDER_MAX_PRICE_COMPLETION` | `0` | Max price per completion token (0 = unlimited) |
+| `SAMBA_POLZA_AI_REASONING_EFFORT` | `medium` | Reasoning effort |
+| `SAMBA_POLZA_AI_REASONING_SUMMARY` | (empty) | Reasoning summary level |
 | `SAMBA_POLZA_AI_REASONING_ENABLED` | `true` | Enable reasoning |
-| `SAMBA_POLZA_AI_REASONING_MAX_TOKENS` | `0` | Max reasoning tokens |
-| `SAMBA_POLZA_AI_REASONING_EXCLUDE` | `false` | Hide reasoning from response |
-
-### Polza.ai Sampling / Generation
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `SAMBA_POLZA_AI_TOP_K` | `0` | Top-K sampling |
-| `SAMBA_POLZA_AI_REPETITION_PENALTY` | `0.0` | Repetition penalty |
-| `SAMBA_POLZA_AI_TOP_P` | `0.0` | Top-P nucleus sampling override |
-| `SAMBA_POLZA_AI_FREQUENCY_PENALTY` | `0.0` | Frequency penalty |
-| `SAMBA_POLZA_AI_PRESENCE_PENALTY` | `0.0` | Presence penalty |
-| `SAMBA_POLZA_AI_SEED` | `0` | Seed for deterministic generation |
-
-### Polza.ai Web Search
-
-| Variable | Default | Description |
-|----------|---------|-------------|
+| `SAMBA_POLZA_AI_REASONING_MAX_TOKENS` | `0` | Max reasoning tokens (0 = unlimited) |
+| `SAMBA_POLZA_AI_REASONING_EXCLUDE` | `false` | Exclude reasoning from response |
+| `SAMBA_POLZA_AI_TOP_K` | `50` | Top-K sampling |
+| `SAMBA_POLZA_AI_REPETITION_PENALTY` | `1` | Repetition penalty |
+| `SAMBA_POLZA_AI_TOP_P` | `0.7` | Top-P sampling |
+| `SAMBA_POLZA_AI_FREQUENCY_PENALTY` | `0` | Frequency penalty |
+| `SAMBA_POLZA_AI_PRESENCE_PENALTY` | `0` | Presence penalty |
+| `SAMBA_POLZA_AI_SEED` | `0` | Random seed (0 = random) |
 | `SAMBA_POLZA_AI_WEB_SEARCH_ENABLED` | `false` | Enable web search |
-| `SAMBA_POLZA_AI_WEB_SEARCH_CONTEXT_SIZE` | `medium` | Context size (low/medium/high) |
+| `SAMBA_POLZA_AI_WEB_SEARCH_CONTEXT_SIZE` | `medium` | Web search context size |
 
-### Management Database
+### Misc
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `SAMBA_SHELL_PROJET_PG_HOST` | `localhost` | PostgreSQL host |
-| `SAMBA_SHELL_PROJET_PG_PORT` | `5432` | PostgreSQL port |
-| `SAMBA_SHELL_PROJET_PG_DBNAME` | `samba_api` | PostgreSQL database name |
-| `SAMBA_SHELL_PROJET_PG_USER` | `samba_api` | PostgreSQL user |
-| `SAMBA_SHELL_PROJET_PG_PASSWORD` | — | PostgreSQL password |
-| `SAMBA_SHELL_PROJET_PG_DSN` | — | Full PostgreSQL DSN (overrides individual settings) |
-| `SAMBA_SHELL_PROJET_PG_POOL_MIN` | `2` | Minimum connection pool size |
-| `SAMBA_SHELL_PROJET_PG_POOL_MAX` | `25` | Maximum connection pool size |
-
-**Note:** The management database was migrated from SQLite to PostgreSQL in v1.8.5. The `SAMBA_MGMT_DB_PATH` environment variable is no longer used. All management data (users, keys, roles, audit log, AI chat sessions) is now stored in PostgreSQL.
+| `SAMBA_BACKUP_DIR` | `/var/lib/samba/api-backups` | Backup storage directory |
+| `SAMBA_BULK_MAX_ROWS` | `10000` | Max rows for bulk CSV import |
+| `SAMBA_ENV_ENCRYPTION_ENABLED` | `true` | Encrypt sensitive .env values at rest |
+| `SAMBA_SAMBA_SHARES_CONF` | `/etc/samba/smb.conf` | Samba shares config file |
+| `SAMBA_SAMBA_SHARES_DIR` | `/srv/samba/shares` | Samba shares directory |
+| `SAMBA_UVICORN_WORKERS` | `1` | Uvicorn worker count |
 
 ---
 
 ## System Endpoints
 
-### Health Check
+All system endpoints are public (no auth required) except `/api/v1/system/stats`.
 
-```http
-GET /health
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/health` | Basic health check. Returns `{"status":"ok","service":"samba-api-server","server_role":"...","version":"pr-a.1.2"}` |
+| `GET` | `/health/detailed` | Detailed health check (DB pool, worker pool, cache, samba-tool availability) |
+| `GET` | `/metrics` | Prometheus-style metrics (request counts, durations, in-flight) |
+| `GET` | `/api/v1/system/stats` | **Auth required.** System + Samba stats combined |
+
+### Examples
+
+```bash
+# Health (HTTPS, self-signed cert)
+curl -k https://127.0.0.1:8099/health
+# {"status":"ok","service":"samba-api-server","server_role":"active directory domain controller","version":"pr-a.1.2"}
+
+# Detailed health
+curl -k https://127.0.0.1:8099/health/detailed
+
+# Metrics
+curl -k https://127.0.0.1:8099/metrics
+
+# System stats
+curl -k -H "X-API-Key: YOUR_KEY" https://127.0.0.1:8099/api/v1/system/stats
 ```
-
-**Response:**
-```json
-{
-  "status": "ok",
-  "service": "samba-api-server",
-  "server_role": "active directory domain controller",
-  "version": "api_v1.9.6"
-}
-```
-
-### Detailed Health Check
-
-```http
-GET /health/detailed
-```
-
-Returns comprehensive health information including Samba service status, database connectivity, and worker pool state.
-
-**Required Permission:** `system.health`
-
-### Prometheus Metrics
-
-```http
-GET /metrics
-```
-
-Returns HTTP request metrics: total requests, counters by method/endpoint/status, duration histograms.
-
-**Required Permission:** `system.metrics`
-
-### System Statistics
-
-```http
-GET /api/v1/system/stats
-```
-
-Returns system stats (CPU, memory, disk, uptime) and Samba stats.
-
-**Required Permission:** `system.stats`
 
 ---
 
 ## Authentication Endpoints
 
-### Login
+All endpoints in this section are public (no auth required to call them — they *verify* auth).
 
-```http
-POST /api/v1/auth/login
+| Method | Path | Body / Params | Description |
+|--------|------|---------------|-------------|
+| `POST` | `/api/v1/auth/login` | `LoginRequest{username, password}` | Authenticate with username/password. Returns `TokenResponse` or `{totp_required:true, temp_token, expires_in:300}` when 2FA is enabled. |
+| `POST` | `/api/v1/auth/refresh` | `RefreshRequest{refresh_token}` | Refresh an access token. Returns new `TokenResponse`. |
+| `GET` | `/api/v1/auth/me` | — | Returns the current user's role, permissions, and expiry. Works with both API key and JWT. |
+| `POST` | `/api/v1/auth/check` | `CheckCredentialsRequest?` (optional) | Verify credentials (3 methods supported: X-API-Key / Bearer / body). Returns `MeResponse`. |
+| `GET` | `/api/v1/auth/test` | — | Full credential diagnostic. Always returns 200 with `{valid, auth_method, message, code, ...}`. |
+
+### `POST /api/v1/auth/login` — example
+
+```bash
+curl -k -X POST https://127.0.0.1:8099/api/v1/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"username":"admin","password":"P@$$w0rd"}'
 ```
 
-**Request Body:**
-```json
-{
-  "username": "admin",
-  "password": "admin"
-}
-```
+Response (no 2FA):
 
-**Response:**
 ```json
 {
-  "access_token": "eyJhbGciOiJIUzI1NiIs...",
-  "refresh_token": "eyJhbGciOiJIUzI1NiIs...",
+  "access_token": "eyJ...",
+  "refresh_token": "eyJ...",
   "token_type": "bearer",
   "expires_in": 1800,
   "role": "admin",
-  "permissions": ["user.create", "user.list", ...]
+  "permissions": ["user.create", "user.list", "..."]
 }
 ```
 
-### Refresh Token
+Response (2FA enabled):
 
-```http
-POST /api/v1/auth/refresh
-```
-
-**Request Body:**
 ```json
 {
-  "refresh_token": "eyJhbGciOiJIUzI1NiIs..."
+  "status": "ok",
+  "totp_required": true,
+  "temp_token": "tmp_abc123...",
+  "expires_in": 300,
+  "username": "admin",
+  "next_step": "POST /api/v1/auth/login/verify with {temp_token, totp_code}"
 }
 ```
 
-Returns a new access/refresh token pair. Re-fetches permissions from the current role definition.
+### `GET /api/v1/auth/me` — example
 
-### Get Current User Info
+```bash
+# With API key
+curl -k -H "X-API-Key: YOUR_KEY" https://127.0.0.1:8099/api/v1/auth/me
 
-```http
-GET /api/v1/auth/me
+# With JWT
+curl -k -H "Authorization: Bearer eyJ..." https://127.0.0.1:8099/api/v1/auth/me
 ```
 
-Works with both API key and JWT Bearer authentication.
-
-**Response:**
 ```json
 {
   "status": "ok",
   "auth_method": "jwt",
   "username": "admin",
   "role": "admin",
-  "permissions": ["user.create", ...],
-  "expires_at": "2026-05-16T12:30:00+00:00"
+  "permissions": ["user.create", "user.list", "..."],
+  "expires_at": "2026-06-19T18:30:00+00:00"
 }
 ```
 
-**Required Permission:** `auth.me`
+---
 
-### Check Credentials
+## 2FA / TOTP
 
-```http
-POST /api/v1/auth/check
+Two-factor authentication using TOTP (RFC 6238). Two routers: `twofa.router` (requires auth, for self-service) and `twofa.public_router` (no auth, for login step 2). Admin endpoints are in `twofa_admin.router` (see [Management API](#management-api-admin-panel)).
+
+### Self-service (requires auth)
+
+| Method | Path | Body | Description |
+|--------|------|------|-------------|
+| `POST` | `/api/v1/auth/2fa/setup` | — | Generate a new TOTP secret + QR code URL |
+| `POST` | `/api/v1/auth/2fa/enable` | `TwoFAEnableRequest{totp_code}` | Enable 2FA after verifying a 6-digit code |
+| `POST` | `/api/v1/auth/2fa/disable` | `TwoFADisableRequest{password}` | Disable 2FA (requires current password) |
+| `GET` | `/api/v1/auth/2fa/status` | — | Check 2FA status for the current user |
+
+### Login step 2 (public)
+
+| Method | Path | Body | Description |
+|--------|------|------|-------------|
+| `POST` | `/api/v1/auth/login/verify` | `TwoFAVerifyRequest{temp_token, totp_code}` | Verify TOTP code, returns full `TokenResponse` |
+
+### Admin (see also [Management API](#management-api-admin-panel))
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/v1/mgmt/users/{user_id}/2fa/status` | Check 2FA status for any user |
+| `POST` | `/api/v1/mgmt/users/{user_id}/2fa/setup` | Generate a new TOTP secret for any user |
+| `POST` | `/api/v1/mgmt/users/{user_id}/2fa/enable` | Enable 2FA for any user (with code or force) |
+| `POST` | `/api/v1/mgmt/users/{user_id}/2fa/disable` | Disable 2FA for any user (admin override) |
+| `POST` | `/api/v1/mgmt/users/{user_id}/2fa/reset` | Reset 2FA for any user (wipe stored secret) |
+| `GET` | `/api/v1/mgmt/2fa/enabled` | List all users with 2FA enabled |
+| `GET` | `/api/v1/mgmt/2fa/disabled` | List all users with a stored secret but 2FA disabled |
+
+### Examples
+
+```bash
+# Setup 2FA (self-service)
+curl -k -X POST -H "Authorization: Bearer eyJ..." \
+  https://127.0.0.1:8099/api/v1/auth/2fa/setup
+# {"status":"ok","secret":"JBSWY3DPEHPK3PXP","qr_url":"otpauth://totp/..."}
+
+# Enable 2FA after entering the code from authenticator app
+curl -k -X POST -H "Authorization: Bearer eyJ..." \
+  -H "Content-Type: application/json" \
+  -d '{"totp_code":"123456"}' \
+  https://127.0.0.1:8099/api/v1/auth/2fa/enable
+
+# Login step 2
+curl -k -X POST \
+  -H "Content-Type: application/json" \
+  -d '{"temp_token":"tmp_abc123...","totp_code":"123456"}' \
+  https://127.0.0.1:8099/api/v1/auth/login/verify
 ```
-
-Accepts three authentication methods (at least one required):
-1. `X-API-Key` header
-2. `Authorization: Bearer <token>` header
-3. Username/password in body
-
-**Request Body (optional):**
-```json
-{
-  "username": "admin",
-  "password": "your-password"
-}
-```
-
-Priority: API key → JWT → username/password.
 
 ---
 
 ## User Management
 
-### List Users
+Router: `app/routers/user.py` — prefix `/api/v1/users`. Tag: `Users`.
 
-```http
-GET /api/v1/users/
+| Method | Path | Body / Params | Description |
+|--------|------|---------------|-------------|
+| `GET` | `/api/v1/users/` | `?limit&offset&search` | List users |
+| `GET` | `/api/v1/users/full` | — | Get all users (fast, via ldbsearch) |
+| `POST` | `/api/v1/users/` | `UserCreateRequest` | Create user |
+| `GET` | `/api/v1/users/{username}` | — | Show user details |
+| `DELETE` | `/api/v1/users/{username}` | — | Delete user |
+| `POST` | `/api/v1/users/{username}/enable` | — | Enable user |
+| `POST` | `/api/v1/users/{username}/disable` | — | Disable user |
+| `POST` | `/api/v1/users/{username}/unlock` | — | Unlock user |
+| `PUT` | `/api/v1/users/{username}/password` | `UserPasswordRequest` | Set user password |
+| `GET` | `/api/v1/users/{username}/groups` | — | Get user groups |
+| `PUT` | `/api/v1/users/{username}/setexpiry` | `UserSetExpiryRequest` | Set account expiry |
+| `PUT` | `/api/v1/users/{username}/setprimarygroup` | — | Set primary group |
+| `POST` | `/api/v1/users/{username}/addunixattrs` | `UserAddUnixAttrsRequest` | Add Unix attributes |
+| `PUT` | `/api/v1/users/{username}/sensitive` | `UserSensitiveRequest` | Set sensitive flag |
+| `POST` | `/api/v1/users/{username}/move` | — | Move user to a new OU |
+| `POST` | `/api/v1/users/{username}/rename` | — | Rename user |
+| `GET` | `/api/v1/users/{username}/getpassword` | — | Get user password (PFX blob) |
+| `GET` | `/api/v1/users/{username}/get-kerberos-ticket` | — | Get Kerberos ticket for user |
+
+### Examples
+
+```bash
+# List users (fast path)
+curl -k -H "X-API-Key: YOUR_KEY" https://127.0.0.1:8099/api/v1/users/full
+
+# Create user
+curl -k -X POST -H "X-API-Key: YOUR_KEY" -H "Content-Type: application/json" \
+  -d '{"username":"jdoe","given_name":"John","surname":"Doe","password":"S3cret!","ou":"OU=Staff,DC=almaz,DC=local"}' \
+  https://127.0.0.1:8099/api/v1/users/
+
+# Set password
+curl -k -X PUT -H "X-API-Key: YOUR_KEY" -H "Content-Type: application/json" \
+  -d '{"password":"N3wP@ss!","must_change_at_next_logon":true}' \
+  https://127.0.0.1:8099/api/v1/users/jdoe/password
 ```
-
-Lists all user accounts via ldbsearch (fast path). Results cached for 30 seconds.
-
-**Required Permission:** `user.list`
-
-**Response:**
-```json
-{
-  "status": "ok",
-  "users": [
-    {
-      "dn": "CN=administrator,CN=Users,DC=kcrb,DC=local",
-      "sAMAccountName": "Administrator",
-      "objectClass": ["user", ...],
-      ...
-    }
-  ]
-}
-```
-
-### Get All Users (Full, Fast)
-
-```http
-GET /api/v1/users/full
-```
-
-Same as list users but explicitly marks the fast ldbsearch path. Cached for 30 seconds.
-
-**Required Permission:** `user.full`
-
-### Create User
-
-```http
-POST /api/v1/users/
-```
-
-Creates a new user account. Attempts direct SamDB API call first, falls back to samba-tool.
-
-**Required Permission:** `user.create`
-
-**Request Body:**
-```json
-{
-  "username": "jdoe",
-  "password": "P@ssw0rd123",
-  "userou": "OU=Staff",
-  "surname": "Doe",
-  "given_name": "John",
-  "initials": "J",
-  "profile_path": "\\\\server\\profiles\\jdoe",
-  "script_path": "login.bat",
-  "home_drive": "H:",
-  "home_directory": "\\\\server\\homes\\jdoe",
-  "job_title": "Engineer",
-  "department": "IT",
-  "company": "Acme Corp",
-  "description": "John Doe account",
-  "mail_address": "jdoe@example.com",
-  "internet_address": "https://example.com",
-  "telephone_number": "+1234567890",
-  "physical_delivery_office": "Room 101",
-  "must_change_at_next_login": true,
-  "use_username_as_cn": false,
-  "random_password": false,
-  "smartcard_required": false,
-  "uid_number": 10001,
-  "gid_number": 10000,
-  "gecos": "John Doe",
-  "login_shell": "/bin/bash",
-  "uid": "jdoe",
-  "nis_domain": "example.com",
-  "unix_home": "/home/jdoe"
-}
-```
-
-Only `username` is required. Returns HTTP 201 on success, HTTP 409 if user already exists.
-
-### Show User Details
-
-```http
-GET /api/v1/users/{username}
-```
-
-Returns all LDAP attributes for the specified user via ldbsearch.
-
-**Required Permission:** `user.show`
-
-### Delete User
-
-```http
-DELETE /api/v1/users/{username}
-```
-
-Deletes a user account. Attempts direct SamDB API call first.
-
-**Required Permission:** `user.delete`
-
-### Enable User
-
-```http
-POST /api/v1/users/{username}/enable
-```
-
-**Required Permission:** `user.enable`
-
-### Disable User
-
-```http
-POST /api/v1/users/{username}/disable
-```
-
-**Required Permission:** `user.disable`
-
-### Unlock User
-
-```http
-POST /api/v1/users/{username}/unlock
-```
-
-**Required Permission:** `user.unlock`
-
-### Set Password
-
-```http
-PUT /api/v1/users/{username}/password
-```
-
-**Required Permission:** `user.setpassword`
-
-**Request Body:**
-```json
-{
-  "new_password": "NewP@ssw0rd",
-  "must_change_at_next_login": false
-}
-```
-
-### Get Password
-
-```http
-GET /api/v1/users/{username}/getpassword
-```
-
-Retrieves password attributes (requires elevated privileges). Uses `tdb://` for direct sam.ldb access.
-
-**Required Permission:** `user.getpassword`
-
-**Query Parameters:**
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `attributes` | `virtualClearTextUTF16` | Comma-separated password attributes |
-
-### Get User Groups
-
-```http
-GET /api/v1/users/{username}/groups
-```
-
-Lists groups the user belongs to via ldbsearch (returns `memberOf` attribute).
-
-**Required Permission:** `user.getgroups`
-
-### Set Account Expiry
-
-```http
-PUT /api/v1/users/{username}/setexpiry
-```
-
-**Required Permission:** `user.setexpiry`
-
-**Request Body:**
-```json
-{
-  "days": 90
-}
-```
-
-### Set Primary Group
-
-```http
-PUT /api/v1/users/{username}/setprimarygroup
-```
-
-**Required Permission:** `user.setprimarygroup`
-
-**Request Body:**
-```json
-{
-  "groupname": "Domain Admins"
-}
-```
-
-### Add Unix Attributes
-
-```http
-POST /api/v1/users/{username}/addunixattrs
-```
-
-Adds RFC 2307 Unix attributes to a user.
-
-**Required Permission:** `user.addunixattrs`
-
-**Request Body:**
-```json
-{
-  "uid_number": 10001,
-  "gid_number": 10000,
-  "unix_home": "/home/jdoe",
-  "login_shell": "/bin/bash",
-  "gecos": "John Doe",
-  "nis_domain": "example.com",
-  "uid": "jdoe"
-}
-```
-
-### Set Sensitive Flag
-
-```http
-PUT /api/v1/users/{username}/sensitive
-```
-
-**Required Permission:** `user.sensitive`
-
-**Request Body:**
-```json
-{
-  "on": true
-}
-```
-
-### Move User
-
-```http
-POST /api/v1/users/{username}/move
-```
-
-**Required Permission:** `user.move`
-
-**Request Body:**
-```json
-{
-  "new_parent_dn": "OU=Staff,DC=kcrb,DC=local"
-}
-```
-
-### Rename User
-
-```http
-POST /api/v1/users/{username}/rename
-```
-
-**Required Permission:** `user.rename`
-
-**Request Body:**
-```json
-{
-  "new_name": "jdoe2"
-}
-```
-
-### Get Kerberos Ticket
-
-```http
-GET /api/v1/users/{username}/get-kerberos-ticket
-```
-
-Requires `CREDENTIALS_USER` and `CREDENTIALS_PASSWORD` to be configured. Returns the ticket as base64-encoded krb5 ccache.
-
-**Required Permission:** `user.getkerberosticket`
 
 ---
 
 ## User Extended Management
 
-### Search Users
+Router: `app/routers/user_mgmt.py` — prefix `/api/v1/users` (v2.7 extended endpoints). Tag: `Users — Extended`.
 
-```http
-GET /api/v1/users/search
-```
+| Method | Path | Body / Params | Description |
+|--------|------|---------------|-------------|
+| `GET` | `/api/v1/users/search` | `?filter&value&limit` | Search users by filter |
+| `POST` | `/api/v1/users/import` | `multipart/form-data` (CSV file) | Import users from CSV |
+| `GET` | `/api/v1/users/export` | `?format=csv\|json` | Export users to CSV/JSON |
+| `PUT` | `/api/v1/users/{username}/edit` | `UserEditRequest` | Edit user attributes via LDAP |
+| `GET` | `/api/v1/users/batch` | `?usernames=jdoe,asmith` | Batch get multiple users |
 
-Searches users by LDAP filter or simple substring. Uses SamDB fast path.
+### Bulk operations
 
-**Required Permission:** `user.search`
+Router: `app/routers/bulk_users.py` — prefix `/api/v1/users`. Tag: `Users — Bulk`.
 
-**Query Parameters:**
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `search` | string | Substring search on sAMAccountName |
-| `filter` | string | Raw LDAP filter |
-| `attributes` | string | Comma-separated attributes to return |
-| `offset` | int | Pagination offset (default: 0) |
-| `limit` | int | Page size (1-1000, default: 100) |
-
-### Import Users from CSV
-
-```http
-POST /api/v1/users/import
-```
-
-Bulk import users from CSV. Runs as a background task.
-
-**Required Permission:** `user.import`
-
-**Request:** Multipart form with CSV file (max 10MB). CSV headers: `username` (required), `password` (required), `first_name`, `last_name`, `email`, `department`, `ou` (optional).
-
-### Export Users
-
-```http
-GET /api/v1/users/export
-```
-
-Export users as CSV or JSON stream.
-
-**Required Permission:** `user.export`
-
-**Query Parameters:**
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `format` | string | `csv` | Output format: `csv` or `json` |
-| `attributes` | string | — | Comma-separated attributes to include |
-
-### Edit User Attributes
-
-```http
-PUT /api/v1/users/{username}/edit
-```
-
-Edit 22+ LDAP attributes via direct SamDB modify or ldbmodify fallback.
-
-**Required Permission:** `user.create` (write operation)
-
-**Request Body:** JSON with any of the 22 mappable attributes (e.g. `givenName`, `sn`, `mail`, `department`, `telephoneNumber`, `title`, `company`, `physicalDeliveryOfficeName`, `description`, `displayName`, `wWWHomePage`, `streetAddress`, `l`, `st`, `postalCode`, `co`, `postOfficeBox`, `mobile`, `homePhone`, `facsimileTelephoneNumber`, `pager`, `info`).
-
-### Batch Get Users
-
-```http
-GET /api/v1/users/batch
-```
-
-Retrieve multiple users in one request (max 100).
-
-**Required Permission:** `user.show`
-
-**Query Parameters:**
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `usernames` | string | Comma-separated usernames (required) |
-| `attributes` | string | Comma-separated attributes |
+| Method | Path | Body | Description |
+|--------|------|------|-------------|
+| `POST` | `/api/v1/users/bulk` | `BulkUserActionRequest` | Bulk operation on AD users (create/delete/enable/disable/move in one call) |
 
 ---
 
 ## Group Management
 
-### List Groups
+Router: `app/routers/group.py` — prefix `/api/v1/groups`. Tag: `Groups`.
 
-```http
-GET /api/v1/groups/
-```
-
-Lists all groups via ldbsearch. Cached for 30 seconds.
-
-**Required Permission:** `group.list`
-
-### Get All Groups (Full, Fast)
-
-```http
-GET /api/v1/groups/full
-```
-
-**Required Permission:** `group.full`
-
-### Create Group
-
-```http
-POST /api/v1/groups/
-```
-
-**Required Permission:** `group.create`
-
-**Request Body:**
-```json
-{
-  "groupname": "Developers",
-  "groupou": "OU=Groups",
-  "group_scope": "Global",
-  "group_type": "Security",
-  "description": "Development team",
-  "mail_address": "dev@example.com",
-  "notes": "All developers",
-  "gid_number": 10010,
-  "nis_domain": "example.com"
-}
-```
-
-### Group Statistics
-
-```http
-GET /api/v1/groups/stats
-```
-
-Returns group statistics computed via ldbsearch.
-
-**Required Permission:** `group.stats`
-
-### Show Group Details
-
-```http
-GET /api/v1/groups/{groupname}
-```
-
-**Required Permission:** `group.show`
-
-### Delete Group
-
-```http
-DELETE /api/v1/groups/{groupname}
-```
-
-**Required Permission:** `group.delete`
-
-### Add Members to Group
-
-```http
-POST /api/v1/groups/{groupname}/members
-```
-
-**Required Permission:** `group.addmembers`
-
-**Request Body:**
-```json
-{
-  "members": ["jdoe", "asmith"],
-  "member_dn": ["CN=Bob,CN=Users,DC=kcrb,DC=local"],
-  "object_types": "user,group,computer",
-  "member_base_dn": "CN=Users,DC=kcrb,DC=local"
-}
-```
-
-Base64-encoded member DNs are automatically decoded.
-
-### Remove Members from Group
-
-```http
-DELETE /api/v1/groups/{groupname}/members
-```
-
-**Required Permission:** `group.removemembers`
-
-Same request body as add members.
-
-### List Group Members
-
-```http
-GET /api/v1/groups/{groupname}/members
-```
-
-Returns the group's `member` attribute as a list of DNs via ldbsearch.
-
-**Required Permission:** `group.listmembers`
-
-### Move Group
-
-```http
-POST /api/v1/groups/{groupname}/move
-```
-
-**Required Permission:** `group.move`
-
-**Request Body:**
-```json
-{
-  "new_parent_dn": "OU=NewGroups,DC=kcrb,DC=local"
-}
-```
+| Method | Path | Body / Params | Description |
+|--------|------|---------------|-------------|
+| `GET` | `/api/v1/groups/full` | — | All groups (fast ldbsearch) |
+| `GET` | `/api/v1/groups/` | `?limit&offset&search` | List groups |
+| `POST` | `/api/v1/groups/` | `GroupCreateRequest` | Create group |
+| `GET` | `/api/v1/groups/stats` | — | Group statistics |
+| `GET` | `/api/v1/groups/{groupname}` | — | Show group details |
+| `DELETE` | `/api/v1/groups/{groupname}` | — | Delete group |
+| `POST` | `/api/v1/groups/{groupname}/members` | `GroupMembersRequest` | Add members |
+| `DELETE` | `/api/v1/groups/{groupname}/members` | `GroupMembersRequest` | Remove members |
+| `GET` | `/api/v1/groups/{groupname}/members` | — | List members |
+| `POST` | `/api/v1/groups/{groupname}/move` | `GroupMoveRequest` | Move group to a new OU |
 
 ---
 
 ## Computer Management
 
-### List Computers
+Router: `app/routers/computer.py` — prefix `/api/v1/computers`. Tag: `Computers`.
 
-```http
-GET /api/v1/computers/
-```
-
-Lists all computer accounts via ldbsearch. Cached for 30 seconds.
-
-**Required Permission:** `computer.list`
-
-### Get All Computers (Full, Fast)
-
-```http
-GET /api/v1/computers/full
-```
-
-**Required Permission:** `computer.full`
-
-### Create Computer
-
-```http
-POST /api/v1/computers/
-```
-
-**Required Permission:** `computer.create`
-
-**Request Body:**
-```json
-{
-  "computername": "WORKSTATION01",
-  "computerou": "OU=Computers",
-  "description": "Employee workstation",
-  "prepare_oldjoin": false,
-  "ip_address_list": ["192.168.1.100"],
-  "service_principal_name_list": ["HOST/workstation01.example.com"]
-}
-```
-
-### Show Computer Details
-
-```http
-GET /api/v1/computers/{computername}
-```
-
-**Required Permission:** `computer.show`
-
-### Delete Computer
-
-```http
-DELETE /api/v1/computers/{computername}
-```
-
-**Required Permission:** `computer.delete`
-
-### Move Computer
-
-```http
-POST /api/v1/computers/{computername}/move
-```
-
-**Required Permission:** `computer.move`
-
-**Request Body:**
-```json
-{
-  "new_ou_dn": "OU=NewComputers,DC=kcrb,DC=local"
-}
-```
+| Method | Path | Body / Params | Description |
+|--------|------|---------------|-------------|
+| `GET` | `/api/v1/computers/full` | — | All computers (fast ldbsearch) |
+| `GET` | `/api/v1/computers/` | `?limit&offset&search` | List computers |
+| `POST` | `/api/v1/computers/` | `ComputerCreateRequest` | Create a computer |
+| `GET` | `/api/v1/computers/{computername}` | — | Show computer details |
+| `DELETE` | `/api/v1/computers/{computername}` | — | Delete a computer |
+| `POST` | `/api/v1/computers/{computername}/move` | `ComputerMoveRequest` | Move a computer |
 
 ---
 
 ## Contact Management
 
-### List Contacts
+Router: `app/routers/contact.py` — prefix `/api/v1/contacts`. Tag: `Contacts`.
 
-```http
-GET /api/v1/contacts/
-```
-
-Lists all contacts via ldbsearch. Cached for 30 seconds.
-
-**Required Permission:** `contact.list`
-
-### Get All Contacts (Full, Fast)
-
-```http
-GET /api/v1/contacts/full
-```
-
-**Required Permission:** `contact.full`
-
-### Create Contact
-
-```http
-POST /api/v1/contacts/
-```
-
-**Required Permission:** `contact.create`
-
-**Request Body:**
-```json
-{
-  "contactname": "John External",
-  "ou": "OU=Contacts",
-  "surname": "External",
-  "given_name": "John",
-  "initials": "J",
-  "display_name": "John External",
-  "description": "External contact",
-  "mail_address": "john@external.com",
-  "telephone_number": "+1234567890",
-  "job_title": "Consultant",
-  "department": "Advisory",
-  "company": "External Corp",
-  "mobile_number": "+1234567891",
-  "internet_address": "https://external.com",
-  "physical_delivery_office": "Remote"
-}
-```
-
-### Show Contact Details
-
-```http
-GET /api/v1/contacts/{contactname}
-```
-
-**Required Permission:** `contact.show`
-
-### Delete Contact
-
-```http
-DELETE /api/v1/contacts/{contactname}
-```
-
-**Required Permission:** `contact.delete`
-
-### Move Contact
-
-```http
-POST /api/v1/contacts/{contactname}/move
-```
-
-**Required Permission:** `contact.move`
-
-**Request Body:**
-```json
-{
-  "new_parent_dn": "OU=NewContacts,DC=kcrb,DC=local"
-}
-```
-
-### Rename Contact
-
-```http
-POST /api/v1/contacts/{contactname}/rename
-```
-
-**Required Permission:** `contact.rename`
-
-**Request Body:**
-```json
-{
-  "new_name": "Jane External"
-}
-```
+| Method | Path | Body / Params | Description |
+|--------|------|---------------|-------------|
+| `GET` | `/api/v1/contacts/full` | — | All contacts (fast ldbsearch) |
+| `GET` | `/api/v1/contacts/` | `?limit&offset&search` | List contacts |
+| `POST` | `/api/v1/contacts/` | `ContactCreateRequest` | Create a contact |
+| `GET` | `/api/v1/contacts/{contactname}` | — | Show contact details |
+| `DELETE` | `/api/v1/contacts/{contactname}` | — | Delete a contact |
+| `POST` | `/api/v1/contacts/{contactname}/move` | `ContactMoveRequest` | Move a contact |
+| `POST` | `/api/v1/contacts/{contactname}/rename` | `ContactRenameRequest` | Rename a contact |
 
 ---
 
 ## Organizational Unit Management
 
-### List OUs
+Router: `app/routers/ou.py` — prefix `/api/v1/ous`. Tag: `Organizational Units`.
 
-```http
-GET /api/v1/ous/
-```
-
-Lists all Organizational Units via ldbsearch. Cached for 30 seconds.
-
-**Required Permission:** `ou.list`
-
-### Get All OUs (Full, Fast)
-
-```http
-GET /api/v1/ous/full
-```
-
-**Required Permission:** `ou.full`
-
-### Create OU
-
-```http
-POST /api/v1/ous/
-```
-
-**Required Permission:** `ou.create`
-
-**Request Body:**
-```json
-{
-  "ouname": "Engineering",
-  "description": "Engineering department"
-}
-```
-
-Simple names (without `=`) are automatically converted to full DNs (e.g. `Engineering` → `OU=Engineering,DC=kcrb,DC=local`).
-
-### Delete OU
-
-```http
-DELETE /api/v1/ous/{ouname}
-```
-
-**Required Permission:** `ou.delete`
-
-### Move OU
-
-```http
-POST /api/v1/ous/{ouname}/move
-```
-
-**Required Permission:** `ou.move`
-
-**Request Body:**
-```json
-{
-  "new_parent_dn": "OU=Departments,DC=kcrb,DC=local"
-}
-```
-
-### Rename OU
-
-```http
-POST /api/v1/ous/{ouname}/rename
-```
-
-**Required Permission:** `ou.rename`
-
-**Request Body:**
-```json
-{
-  "new_name": "EngineeringDept"
-}
-```
-
-### List Objects in OU
-
-```http
-GET /api/v1/ous/{ouname}/objects
-```
-
-Lists direct children of the specified OU via ldbsearch (one-level scope).
-
-**Required Permission:** `ou.listobjects`
+| Method | Path | Body / Params | Description |
+|--------|------|---------------|-------------|
+| `GET` | `/api/v1/ous/full` | — | All OUs (fast ldbsearch) |
+| `GET` | `/api/v1/ous/` | `?limit&offset&search` | List OUs |
+| `POST` | `/api/v1/ous/` | `OUCreateRequest` | Create an OU |
+| `DELETE` | `/api/v1/ous/{ouname}` | — | Delete an OU |
+| `POST` | `/api/v1/ous/{ouname}/move` | `OUMoveRequest` | Move an OU |
+| `POST` | `/api/v1/ous/{ouname}/rename` | `OURenameRequest` | Rename an OU |
+| `GET` | `/api/v1/ous/{ouname}/objects` | — | List objects in an OU |
 
 ---
 
 ## OU Extended Management
 
-### Get OU Tree
+Router: `app/routers/ou_mgmt.py` — prefix `/api/v1/ous` (v2.7 extended endpoints). Tag: `OUs — Extended`.
 
-```http
-GET /api/v1/ous/tree
-```
-
-Returns hierarchical OU tree structure with `OUTreeNode` objects containing `name`, `dn`, `children`, and `object_count`.
-
-**Required Permission:** `ou.tree`
-
-### Search OUs
-
-```http
-GET /api/v1/ous/search
-```
-
-Search OUs by LDAP filter or substring.
-
-**Required Permission:** `ou.search`
-
-### Get OU Statistics
-
-```http
-GET /api/v1/ous/{ou_dn}/stats
-```
-
-Counts users, groups, computers, contacts, and sub-OUs within the specified OU.
-
-**Required Permission:** `ou.stats`
-
-### Get OU Sub-tree
-
-```http
-GET /api/v1/ous/{ou_dn}/tree
-```
-
-Returns the sub-tree under a specific OU.
-
-**Required Permission:** `ou.tree`
+| Method | Path | Body / Params | Description |
+|--------|------|---------------|-------------|
+| `GET` | `/api/v1/ous/tree` | — | Get OU tree structure |
+| `GET` | `/api/v1/ous/search` | `?filter&value` | Search OUs by filter |
+| `GET` | `/api/v1/ous/{ou_dn}/stats` | — | Statistics for an OU |
+| `GET` | `/api/v1/ous/{ou_dn}/tree` | — | Sub-tree under a specific OU |
 
 ---
 
 ## Domain Management
 
-### Domain Info (Fast)
-
-```http
-GET /api/v1/domain/full
-```
-
-Returns domain DN, SID, functional level, and FSMO role owner via ldbsearch. Cached for 30 seconds.
-
-**Required Permission:** `domain.full`
-
-### Domain Info
-
-```http
-GET /api/v1/domain/info
-```
-
-General domain information via ldbsearch (no IP address required).
-
-**Required Permission:** `domain.info`
-
-### Get Domain Functional Level
-
-```http
-GET /api/v1/domain/level
-```
-
-Returns domain, forest, and lowest DC functional levels.
-
-**Required Permission:** `domain.level`
-
-**Response:**
-```json
-{
-  "status": "ok",
-  "domain_function_level": "Windows 2016",
-  "forest_function_level": "Windows 2016",
-  "lowest_dc_function_level": "Windows 2016",
-  "msDS-Behavior-Version": "7",
-  "msDS-forestBehaviorVersion": "7",
-  "lowest_dc_msDS-Behavior-Version": "7"
-}
-```
-
-Level mapping: 0=2000, 1=2003 Interim, 2=2003, 3=2008, 4=2008 R2, 5=2012, 6=2012 R2, 7=2016.
-
-### Set Domain Functional Level
-
-```http
-PUT /api/v1/domain/level
-```
-
-**Required Permission:** `domain.level`
-
-**Warning:** Raising the functional level is irreversible.
-
-**Request Body:**
-```json
-{
-  "level": "2016"
-}
-```
-
-Returns HTTP 409 if the level is equal to or lower than the current level.
-
-### Get Password Settings
-
-```http
-GET /api/v1/domain/passwordsettings
-```
-
-**Required Permission:** `domain.passwordsettings`
-
-### Set Password Settings
-
-```http
-PUT /api/v1/domain/passwordsettings
-```
-
-**Required Permission:** `domain.passwordsettings`
-
-**Request Body:**
-```json
-{
-  "min_password_length": 8,
-  "password_history_length": 24,
-  "min_password_age": 1,
-  "max_password_age": 90,
-  "complexity": true,
-  "store_plaintext": false,
-  "account_lockout_duration": 30,
-  "account_lockout_threshold": 5,
-  "reset_account_lockout_after": 30
-}
-```
-
-At least one setting must be provided.
-
-### Create Trust
-
-```http
-POST /api/v1/domain/trust/create
-```
-
-**Required Permission:** `domain.trustcreate`
-
-**Requires DC role.** Includes DNS SRV pre-check to avoid long timeouts for non-existent domains.
-
-**Request Body:**
-```json
-{
-  "trusted_domain_name": "other.example.com",
-  "trusted_username": "admin",
-  "trusted_password": "password",
-  "trust_type": "forest",
-  "trust_direction": "both"
-}
-```
-
-### Delete Trust
-
-```http
-DELETE /api/v1/domain/trust/delete?trusted_domain_name=other.example.com
-```
-
-**Required Permission:** `domain.trustdelete`
-
-### List Trusts
-
-```http
-GET /api/v1/domain/trust/list
-```
-
-Lists trustedDomain objects via ldbsearch.
-
-**Required Permission:** `domain.trustlist`
-
-### Trust Namespaces
-
-```http
-GET /api/v1/domain/trust/namespaces?trusted_domain_name=other.example.com
-```
-
-### Validate Trust
-
-```http
-POST /api/v1/domain/trust/validate?trusted_domain_name=other.example.com
-```
-
-### Online Backup
-
-```http
-POST /api/v1/domain/backup/online
-```
-
-Starts an online backup. Runs as a background task.
-
-**Request Body:**
-```json
-{
-  "target_dir": "/var/backups/samba",
-  "server": "dc1.example.com"
-}
-```
-
-### Offline Backup
-
-```http
-POST /api/v1/domain/backup/offline
-```
-
-Starts an offline backup. Runs as a background task.
-
-### Create KDS Root Key
-
-```http
-POST /api/v1/domain/kds/root-key/create
-```
-
-### List KDS Root Keys
-
-```http
-GET /api/v1/domain/kds/root-key/list
-```
-
-Lists msKds-ProvRootKey objects via ldbsearch.
-
-### Export Keytab
-
-```http
-POST /api/v1/domain/exportkeytab?principal=HTTP/web.example.com&keytab_path=/tmp/exported.keytab
-```
-
-Exports a keytab file. Computer account principals are rejected (HTTP 422). Runs as a background task.
-
-### Join Domain
-
-```http
-POST /api/v1/domain/join
-```
-
-**Dangerous operation** — requires `force: true`. Fast-fails if server is already a DC or domain member.
-
-### Leave Domain
-
-```http
-POST /api/v1/domain/leave
-```
-
-**Dangerous operation** — requires `force: true`. Fast-fails if server is a DC or standalone.
+Router: `app/routers/domain.py` — prefix `/api/v1/domain`. Tag: `Domain`.
+
+| Method | Path | Body / Params | Description |
+|--------|------|---------------|-------------|
+| `GET` | `/api/v1/domain/full` | — | Domain info (fast ldbsearch) |
+| `GET` | `/api/v1/domain/info` | `?ip_address` | Domain info |
+| `GET` | `/api/v1/domain/level` | — | Get domain functional level |
+| `PUT` | `/api/v1/domain/level` | `DomainLevelSetRequest` | Set domain functional level (2000/2003/2008/2008_R2/2012/2012_R2/2016) |
+| `GET` | `/api/v1/domain/passwordsettings` | — | Get password settings |
+| `PUT` | `/api/v1/domain/passwordsettings` | `PasswordSettingsSetRequest` | Set password settings |
+| `POST` | `/api/v1/domain/trust/create` | `TrustCreateRequest` | Create trust |
+| `DELETE` | `/api/v1/domain/trust/delete` | — | Delete trust |
+| `GET` | `/api/v1/domain/trust/list` | — | List trusts |
+| `GET` | `/api/v1/domain/trust/namespaces` | — | Trust namespaces |
+| `POST` | `/api/v1/domain/trust/validate` | — | Validate trust |
+| `POST` | `/api/v1/domain/backup/online` | `BackupRequest` | Online backup (returns `task_id`) |
+| `POST` | `/api/v1/domain/backup/offline` | `BackupRequest` | Offline backup (returns `task_id`) |
+| `POST` | `/api/v1/domain/kds/root-key/create` | — | Create KDS root key |
+| `GET` | `/api/v1/domain/kds/root-key/list` | — | List KDS root keys |
+| `POST` | `/api/v1/domain/exportkeytab` | — | Export keytab |
+| `POST` | `/api/v1/domain/join` | `ForceActionRequest` | Join domain (requires `force:true`) |
+| `POST` | `/api/v1/domain/leave` | `ForceActionRequest` | Leave domain (requires `force:true`) |
+| `POST` | `/api/v1/domain/demote` | `DemoteRequest` | Demote domain controller |
+| `POST` | `/api/v1/domain/provision` | — | **Deprecated.** Provision (disabled) |
+| `GET` | `/api/v1/domain/claim/types` | — | List claim types |
 
 ---
 
 ## DNS Management
 
-All DNS commands require a server parameter (defaults to auto-detected DC hostname). DNS operations use DCE/RPC over SMB with Kerberos authentication.
+Router: `app/routers/dns.py` — prefix `/api/v1/dns`. Tag: `DNS`.
 
-### DNS Server Info
-
-```http
-GET /api/v1/dns/serverinfo
-```
-
-**Required Permission:** `dns.serverinfo`
-
-Cached for 300 seconds (5 minutes). Not JSON-output compatible.
-
-**Query Parameters:**
-| Parameter | Description |
-|-----------|-------------|
-| `server` | DNS server hostname |
-| `client_version` | Client version string |
-
-### List DNS Zones
-
-```http
-GET /api/v1/dns/zones
-```
-
-**Required Permission:** `dns.zonelist`
-
-**Query Parameters:**
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `server` | string | DNS server hostname |
-| `primary` | bool | List primary zones |
-| `secondary` | bool | List secondary zones |
-| `cache` | bool | List cache zones |
-| `auto` | bool | List auto-created zones |
-| `forward` | bool | List forward zones |
-| `reverse` | bool | List reverse zones |
-| `ds` | bool | List AD-integrated zones |
-| `non_ds` | bool | List non-AD-integrated zones |
-
-### Zone Info
-
-```http
-GET /api/v1/dns/zones/{zone}
-```
-
-**Required Permission:** `dns.zoneinfo`
-
-### Create DNS Zone
-
-```http
-POST /api/v1/dns/zones
-```
-
-**Required Permission:** `dns.zonecreate`
-
-**Request Body:**
-```json
-{
-  "zone": "example.com",
-  "dns_directory_partition": "domain"
-}
-```
-
-**Query Parameters:**
-| Parameter | Description |
-|-----------|-------------|
-| `server` | DNS server hostname |
-| `overwrite` | Delete existing zone before creating (default: false) |
-
-### Delete DNS Zone
-
-```http
-DELETE /api/v1/dns/zones/{zone}
-```
-
-**Required Permission:** `dns.zonedelete`
-
-### List DNS Records
-
-```http
-GET /api/v1/dns/zones/{zone}/records
-```
-
-**Required Permission:** `dns.recordlist`
-
-**Query Parameters:**
-| Parameter | Description |
-|-----------|-------------|
-| `server` | DNS server hostname |
-| `name` | Record name (default: `@` for zone root) |
-| `record_type` | Record type (e.g. A, CNAME, MX; default: ALL) |
-
-### Create DNS Record
-
-```http
-POST /api/v1/dns/zones/{zone}/records
-```
-
-**Required Permission:** `dns.recordcreate`
-
-**Request Body:**
-```json
-{
-  "name": "www",
-  "record_type": "A",
-  "data": "192.168.1.10"
-}
-```
-
-### Delete DNS Record
-
-```http
-DELETE /api/v1/dns/zones/{zone}/records
-```
-
-**Required Permission:** `dns.recorddelete`
-
-**Request Body:**
-```json
-{
-  "name": "www",
-  "record_type": "A",
-  "data": "192.168.1.10"
-}
-```
-
-### Update DNS Record
-
-```http
-PUT /api/v1/dns/zones/{zone}/records
-```
-
-**Required Permission:** `dns.recordupdate`
-
-**Request Body:**
-```json
-{
-  "name": "www",
-  "old_record_type": "A",
-  "old_data": "192.168.1.10",
-  "new_data": "192.168.1.20"
-}
-```
-
-### Read-Only Records Query
-
-```http
-GET /api/v1/dns/zones/{zone}/rorecords
-```
-
-**Required Permission:** `dns.rorecords`
-
-Semantically distinct read-only access point (same backend as records list).
-
-### Set Zone Options
-
-```http
-PUT /api/v1/dns/zones/{zone}/options
-```
-
-**Required Permission:** `dns.zoneoptions`
-
-**Request Body:**
-```json
-{
-  "aging": true,
-  "no_scavenge": false
-}
-```
+| Method | Path | Body / Params | Description |
+|--------|------|---------------|-------------|
+| `GET` | `/api/v1/dns/serverinfo` | — | DNS server info |
+| `GET` | `/api/v1/dns/zones` | — | List DNS zones |
+| `GET` | `/api/v1/dns/zones/{zone}` | — | Zone info |
+| `POST` | `/api/v1/dns/zones` | `DNSZoneCreateRequest` | Create DNS zone |
+| `DELETE` | `/api/v1/dns/zones/{zone}` | — | Delete DNS zone |
+| `GET` | `/api/v1/dns/zones/{zone}/records` | `?name&type` | List DNS records |
+| `POST` | `/api/v1/dns/zones/{zone}/records` | `DNSRecordCreateRequest` | Create DNS record |
+| `DELETE` | `/api/v1/dns/zones/{zone}/records` | `DNSRecordDeleteRequest` | Delete DNS record |
+| `PUT` | `/api/v1/dns/zones/{zone}/records` | `DNSRecordUpdateRequest` | Update DNS record |
+| `GET` | `/api/v1/dns/zones/{zone}/rorecords` | `?name&type` | Query DNS records (read-only) |
+| `PUT` | `/api/v1/dns/zones/{zone}/options` | — | Set zone options |
+| `POST` | `/api/v1/dns/cache/invalidate` | — | Invalidate DNS cache |
 
 ---
 
 ## Group Policy (GPO) Management
 
-GPO identifiers (GUIDs) are automatically wrapped in braces if not already present.
+Router: `app/routers/gpo.py` — prefix `/api/v1/gpo`. Tag: `Group Policy`.
 
-### List GPOs
-
-```http
-GET /api/v1/gpo/
-```
-
-**Required Permission:** `gpo.list`
-
-### Get All GPOs (Full, Fast)
-
-```http
-GET /api/v1/gpo/full
-```
-
-**Required Permission:** `gpo.full`
-
-Cached for 30 seconds via ldbsearch.
-
-### Create GPO
-
-```http
-POST /api/v1/gpo/
-```
-
-**Required Permission:** `gpo.create`
-
-**Request Body:**
-```json
-{
-  "displayname": "New Policy"
-}
-```
-
-**Query Parameters:**
-| Parameter | Description |
-|-----------|-------------|
-| `overwrite` | Delete+recreate on conflict (default: false) |
-
-### Show GPO Details
-
-```http
-GET /api/v1/gpo/{gpo_id}
-```
-
-**Required Permission:** `gpo.show`
-
-`gpo_id` can be a GUID (with or without braces) or display name.
-
-### Delete GPO
-
-```http
-DELETE /api/v1/gpo/{gpo_id}
-```
-
-**Required Permission:** `gpo.delete`
-
-Runs as a background task.
-
-### Delete GPO by Name
-
-```http
-DELETE /api/v1/gpo/by-name/{displayname}
-```
-
-**Required Permission:** `gpo.deletebyname`
-
-Deletes all GPOs matching the display name (synchronous).
-
-### Link GPO
-
-```http
-POST /api/v1/gpo/{gpo_id}/link
-```
-
-**Required Permission:** `gpo.link`
-
-**Request Body:**
-```json
-{
-  "container_dn": "OU=Computers,DC=kcrb,DC=local"
-}
-```
-
-### Unlink GPO
-
-```http
-DELETE /api/v1/gpo/{gpo_id}/link
-```
-
-**Required Permission:** `gpo.unlink`
-
-**Request Body:**
-```json
-{
-  "container_dn": "OU=Computers,DC=kcrb,DC=local"
-}
-```
-
-### Get GPO Inheritance
-
-```http
-GET /api/v1/gpo/{gpo_id}/inherit
-```
-
-**Required Permission:** `gpo.getinherit`
-
-### Set GPO Inheritance
-
-```http
-PUT /api/v1/gpo/{gpo_id}/inherit
-```
-
-**Required Permission:** `gpo.setinherit`
-
-**Request Body:**
-```json
-{
-  "container_dn": "OU=Computers,DC=kcrb,DC=local",
-  "block_inheritance": true
-}
-```
-
-### Backup GPO
-
-```http
-POST /api/v1/gpo/{gpo_id}/backup
-```
-
-**Required Permission:** `gpo.backup`
-
-Runs as a background task.
-
-### Restore GPO
-
-```http
-POST /api/v1/gpo/{gpo_id}/restore
-```
-
-**Required Permission:** `gpo.restore`
-
-Runs as a background task.
-
-### Fetch GPO Data
-
-```http
-GET /api/v1/gpo/{gpo_id}/fetch
-```
-
-**Required Permission:** `gpo.fetch`
+| Method | Path | Body / Params | Description |
+|--------|------|---------------|-------------|
+| `GET` | `/api/v1/gpo/full` | — | All GPOs (fast ldbsearch) |
+| `GET` | `/api/v1/gpo/` | — | List GPOs |
+| `POST` | `/api/v1/gpo/` | `GpoCreateRequest` | Create GPO |
+| `GET` | `/api/v1/gpo/{gpo_id}` | — | Show GPO detail |
+| `DELETE` | `/api/v1/gpo/{gpo_id}` | — | Delete GPO |
+| `DELETE` | `/api/v1/gpo/by-name/{displayname}` | — | Delete GPO by displayname |
+| `POST` | `/api/v1/gpo/{gpo_id}/link` | `GpoLinkRequest` | Link GPO |
+| `DELETE` | `/api/v1/gpo/{gpo_id}/link` | `GpoUnlinkRequest` | Unlink GPO |
+| `GET` | `/api/v1/gpo/{gpo_id}/inherit` | — | Get inheritance |
+| `PUT` | `/api/v1/gpo/{gpo_id}/inherit` | `GpoSetInheritRequest` | Set inheritance |
+| `POST` | `/api/v1/gpo/{gpo_id}/backup` | `GpoBackupRequest` | Backup GPO (returns `task_id`) |
+| `POST` | `/api/v1/gpo/{gpo_id}/restore` | `GpoRestoreRequest` | Restore GPO (returns `task_id`) |
+| `GET` | `/api/v1/gpo/{gpo_id}/fetch` | — | Fetch GPO data |
 
 ---
 
 ## FSMO Roles
 
-### Show FSMO Roles
+Router: `app/routers/fsmo.py` — prefix `/api/v1/fsmo`. Tag: `FSMO Roles`.
 
-```http
-GET /api/v1/fsmo/
-```
-
-**Required Permission:** `fsmo.show`
-
-### Get FSMO Roles (Full, Fast)
-
-```http
-GET /api/v1/fsmo/full
-```
-
-**Required Permission:** `fsmo.full`
-
-Cached for 30 seconds via ldbsearch.
-
-### Transfer FSMO Role
-
-```http
-PUT /api/v1/fsmo/transfer
-```
-
-**Required Permission:** `fsmo.transfer`
-
-**Request Body:**
-```json
-{
-  "role": "ridalloc"
-}
-```
-
-Role options: `ridalloc`, `pdc`, `infrastructure`, `naming`, `schema`
-
-### Seize FSMO Role
-
-```http
-PUT /api/v1/fsmo/seize
-```
-
-**Required Permission:** `fsmo.seize`
-
-**Request Body:**
-```json
-{
-  "role": "pdc"
-}
-```
+| Method | Path | Body / Params | Description |
+|--------|------|---------------|-------------|
+| `GET` | `/api/v1/fsmo/full` | — | FSMO roles (fast ldbsearch) |
+| `GET` | `/api/v1/fsmo/` | — | Show FSMO roles (`FsmoShowResponse`) |
+| `PUT` | `/api/v1/fsmo/transfer` | `FsmoTransferRequest` | Transfer FSMO role (`FsmoTransferResponse`) |
+| `PUT` | `/api/v1/fsmo/seize` | `FsmoSeizeRequest` | Seize FSMO role (`FsmoSeizeResponse`) |
 
 ---
 
 ## DRS Replication
 
-### Show Replication Status
+Router: `app/routers/drs.py` — prefix `/api/v1/drs`. Tag: `DRS Replication`.
 
-```http
-GET /api/v1/drs/showrepl
-```
-
-**Required Permission:** `drs.showrepl`
-
-**Query Parameters:**
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `server` | string | Auto-detected | DC hostname |
-| `timeout` | int | 120 | Command timeout (5-1200s) |
-
-### Replicate Naming Context
-
-```http
-POST /api/v1/drs/replicate
-```
-
-**Required Permission:** `drs.kcc`
-
-Runs as a background task (HTTP 202).
-
-### Check Up-to-dateness
-
-```http
-GET /api/v1/drs/uptodateness
-```
-
-**Query Parameters:**
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `object_dn` | string | — | Object DN to check |
-| `timeout` | int | 900 | Timeout (60-1800s) |
-
-### DRS Bind Info
-
-```http
-GET /api/v1/drs/bind
-```
-
-**Required Permission:** `drs.bind`
-
-### Get DRS Options
-
-```http
-GET /api/v1/drs/options
-```
-
-**Required Permission:** `drs.options`
+| Method | Path | Body / Params | Description |
+|--------|------|---------------|-------------|
+| `GET` | `/api/v1/drs/showrepl` | — | Show replication status (`DrsShowreplResponse`) |
+| `POST` | `/api/v1/drs/replicate` | `DrsReplicateRequest` | Replicate naming context (`DrsReplicateResponse`) |
+| `GET` | `/api/v1/drs/uptodateness` | — | Check uptodateness (`DrsUptodatenessResponse`) |
+| `GET` | `/api/v1/drs/bind` | — | DRS bind info (`DrsBindResponse`) |
+| `GET` | `/api/v1/drs/options` | — | Get DRS options (`DrsOptionsResponse`) |
 
 ---
 
 ## Sites & Subnets
 
-### List Sites
+Router: `app/routers/sites.py` — prefix `/api/v1/sites`. Tag: `Sites & Subnets`.
 
-```http
-GET /api/v1/sites/
-```
-
-**Required Permission:** `sites.list`
-
-### View Site
-
-```http
-GET /api/v1/sites/{sitename}
-```
-
-**Required Permission:** `sites.show`
-
-### Create Site
-
-```http
-POST /api/v1/sites/
-```
-
-**Required Permission:** `sites.create`
-
-**Request Body:**
-```json
-{
-  "sitename": "NewSite"
-}
-```
-
-### Delete Site
-
-```http
-DELETE /api/v1/sites/{sitename}
-```
-
-**Required Permission:** `sites.delete`
-
-### List Subnets in Site
-
-```http
-GET /api/v1/sites/{sitename}/subnets
-```
-
-**Required Permission:** `sites.subnetlist`
-
-### View Subnet
-
-```http
-GET /api/v1/sites/subnets/?subnetname=192.168.1.0/24
-```
-
-### Create Subnet
-
-```http
-POST /api/v1/sites/{sitename}/subnets
-```
-
-**Request Body:**
-```json
-{
-  "subnetname": "192.168.1.0/24"
-}
-```
-
-### Delete Subnet
-
-```http
-DELETE /api/v1/sites/subnets/?subnetname=192.168.1.0/24
-```
-
-### Set Subnet Site
-
-```http
-PUT /api/v1/sites/subnets/site?subnetname=192.168.1.0/24
-```
-
-**Request Body:**
-```json
-{
-  "sitename": "NewSite"
-}
-```
+| Method | Path | Body / Params | Description |
+|--------|------|---------------|-------------|
+| `GET` | `/api/v1/sites/` | — | List sites |
+| `GET` | `/api/v1/sites/{sitename}` | — | View site detail |
+| `POST` | `/api/v1/sites/` | `SiteCreateRequest` | Create site |
+| `DELETE` | `/api/v1/sites/{sitename}` | — | Delete site |
+| `GET` | `/api/v1/sites/{sitename}/subnets` | — | List subnets in site |
+| `GET` | `/api/v1/sites/subnets/` | — | View subnet detail |
+| `POST` | `/api/v1/sites/{sitename}/subnets` | `SubnetCreateRequest` | Create subnet |
+| `DELETE` | `/api/v1/sites/subnets/` | — | Delete subnet |
+| `PUT` | `/api/v1/sites/subnets/site` | `SubnetSetSiteRequest` | Set subnet site |
 
 ---
 
 ## Schema
 
-### Show Schema Attribute
+Router: `app/routers/schema.py` — prefix `/api/v1/schema`. Tag: `Schema`.
 
-```http
-GET /api/v1/schema/attributes/{attribute}
-```
-
-**Required Permission:** `schema.show`
-
-### Show Schema Class
-
-```http
-GET /api/v1/schema/classes/{classname}
-```
-
-**Required Permission:** `schema.show`
+| Method | Path | Body / Params | Description |
+|--------|------|---------------|-------------|
+| `GET` | `/api/v1/schema/attributes/{attribute}` | — | Show schema attribute detail |
+| `GET` | `/api/v1/schema/classes/{classname}` | — | Show schema class detail |
 
 ---
 
 ## Delegation
 
-### Add Delegation
+Router: `app/routers/delegation.py` — prefix `/api/v1/delegation`. Tag: `Delegation`.
 
-```http
-POST /api/v1/delegation/add
-```
-
-**Required Permission:** `delegation.set`
-
-**Request Body:**
-```json
-{
-  "accountname": "jdoe",
-  "service": "cifs/server"
-}
-```
-
-### Remove Delegation
-
-```http
-DELETE /api/v1/delegation/remove
-```
-
-**Required Permission:** `delegation.delete`
-
-**Request Body:** Same as add.
-
-### Show Delegations for Account
-
-```http
-GET /api/v1/delegation/for-account?accountname=jdoe
-```
-
-**Required Permission:** `delegation.list`
+| Method | Path | Body / Params | Description |
+|--------|------|---------------|-------------|
+| `POST` | `/api/v1/delegation/add` | `DelegationAccountService` | Add delegation |
+| `DELETE` | `/api/v1/delegation/remove` | `DelegationAccountService` | Remove delegation |
+| `GET` | `/api/v1/delegation/for-account` | `?account` | Show delegations for account |
 
 ---
 
 ## Service Accounts
 
-### List Service Accounts
+Router: `app/routers/service_account.py` — prefix `/api/v1/service-accounts`. Tag: `Service Accounts`.
 
-```http
-GET /api/v1/service-accounts/
-```
-
-**Required Permission:** `serviceaccount.list`
-
-### Create Service Account
-
-```http
-POST /api/v1/service-accounts/
-```
-
-**Required Permission:** `serviceaccount.create`
-
-**Request Body:**
-```json
-{
-  "accountname": "svc_webapp",
-  "dns_host_name": "webapp.example.com",
-  "description": "Web application service account"
-}
-```
-
-### Show Service Account
-
-```http
-GET /api/v1/service-accounts/{accountname}
-```
-
-**Required Permission:** `serviceaccount.show`
-
-### Delete Service Account
-
-```http
-DELETE /api/v1/service-accounts/{accountname}
-```
-
-**Required Permission:** `serviceaccount.delete`
-
-### Add gMSA Member
-
-```http
-POST /api/v1/service-accounts/{accountname}/gmsa-members/add
-```
-
-**Request Body:**
-```json
-{
-  "members": ["DOMAIN\\jdoe", "DOMAIN\\webserver$"]
-}
-```
-
-### Remove gMSA Member
-
-```http
-DELETE /api/v1/service-accounts/{accountname}/gmsa-members/remove
-```
-
-### List gMSA Members
-
-```http
-GET /api/v1/service-accounts/{accountname}/gmsa-members
-```
+| Method | Path | Body / Params | Description |
+|--------|------|---------------|-------------|
+| `GET` | `/api/v1/service-accounts/` | — | List service accounts |
+| `POST` | `/api/v1/service-accounts/` | `CreateServiceAccountRequest` | Create service account |
+| `GET` | `/api/v1/service-accounts/{accountname}` | — | Show service account |
+| `DELETE` | `/api/v1/service-accounts/{accountname}` | — | Delete service account |
+| `POST` | `/api/v1/service-accounts/{accountname}/gmsa-members/add` | `GmsaMembersRequest` | Add gMSA member |
+| `DELETE` | `/api/v1/service-accounts/{accountname}/gmsa-members/remove` | `GmsaMembersRequest` | Remove gMSA member |
+| `GET` | `/api/v1/service-accounts/{accountname}/gmsa-members` | — | List gMSA members |
 
 ---
 
-## Authentication Policies
+## Authentication Policies & Silos
 
-### List Authentication Silos
+Router: `app/routers/auth_policy.py` — prefix `/api/v1/auth`. Tag: `Authentication Policies`.
 
-```http
-GET /api/v1/auth/silos
-```
-
-**Required Permission:** `authpolicy.list`
-
-### Create Authentication Silo
-
-```http
-POST /api/v1/auth/silos
-```
-
-**Required Permission:** `authpolicy.create`
-
-**Request Body:**
-```json
-{
-  "siloname": "HighSecuritySilo",
-  "description": "High security authentication silo"
-}
-```
-
-### Show Authentication Silo
-
-```http
-GET /api/v1/auth/silos/{siloname}
-```
-
-### Delete Authentication Silo
-
-```http
-DELETE /api/v1/auth/silos/{siloname}
-```
-
-### Add Silo Member
-
-```http
-POST /api/v1/auth/silos/{siloname}/members
-```
-
-**Request Body:**
-```json
-{
-  "accountname": "jdoe"
-}
-```
-
-### Remove Silo Member
-
-```http
-DELETE /api/v1/auth/silos/{siloname}/members
-```
-
-### List Authentication Policies
-
-```http
-GET /api/v1/auth/policies
-```
-
-### Create Authentication Policy
-
-```http
-POST /api/v1/auth/policies
-```
-
-**Request Body:**
-```json
-{
-  "policyname": "StrictPolicy",
-  "description": "Strict authentication policy"
-}
-```
-
-### Show Authentication Policy
-
-```http
-GET /api/v1/auth/policies/{policyname}
-```
-
-### Delete Authentication Policy
-
-```http
-DELETE /api/v1/auth/policies/{policyname}
-```
+| Method | Path | Body / Params | Description |
+|--------|------|---------------|-------------|
+| `GET` | `/api/v1/auth/silos` | — | List authentication silos |
+| `POST` | `/api/v1/auth/silos` | `CreateSiloRequest` | Create authentication silo |
+| `GET` | `/api/v1/auth/silos/{siloname}` | — | Show authentication silo |
+| `DELETE` | `/api/v1/auth/silos/{siloname}` | — | Delete authentication silo |
+| `POST` | `/api/v1/auth/silos/{siloname}/members` | `SiloMemberRequest` | Add member to silo |
+| `DELETE` | `/api/v1/auth/silos/{siloname}/members` | `SiloMemberRequest` | Remove member from silo |
+| `GET` | `/api/v1/auth/policies` | — | List authentication policies |
+| `POST` | `/api/v1/auth/policies` | `CreatePolicyRequest` | Create authentication policy |
+| `GET` | `/api/v1/auth/policies/{policyname}` | — | Show authentication policy |
+| `DELETE` | `/api/v1/auth/policies/{policyname}` | — | Delete authentication policy |
 
 ---
 
 ## Miscellaneous Operations
 
-### Database Check
+Router: `app/routers/misc.py` — prefix `/api/v1/misc`. Tag: `Miscellaneous`.
 
-```http
-GET /api/v1/misc/dbcheck
-```
-
-Runs as a background task.
-
-### Database Check Fix
-
-```http
-POST /api/v1/misc/dbcheck/fix
-```
-
-**Request Body:**
-```json
-{
-  "yes": true
-}
-```
-
-Runs as a background task.
-
-### Get NT ACL
-
-```http
-GET /api/v1/misc/ntacl?file_path=/var/lib/samba/sysvol
-```
-
-### Set NT ACL
-
-```http
-POST /api/v1/misc/ntacl/set
-```
-
-**Request Body:**
-```json
-{
-  "file_path": "/var/lib/samba/sysvol/policy",
-  "sddl": "D:PAI(A;OICI;0x001200a9;;;AU)"
-}
-```
-
-### Reset Sysvol ACLs
-
-```http
-POST /api/v1/misc/ntacl/sysvolreset
-```
-
-Runs as a background task.
-
-### Test Configuration (testparm)
-
-```http
-GET /api/v1/misc/testparm
-```
-
-Runs as a background task.
-
-### List Samba Processes
-
-```http
-GET /api/v1/misc/processes
-```
-
-### Get Server Time
-
-```http
-GET /api/v1/misc/time
-```
-
-Uses 4 fallback methods: ldbsearch tdb:// → samba-tool time → CLDAP domain info → system clock.
-
-### List SPNs
-
-```http
-GET /api/v1/misc/spn/list?accountname=jdoe
-```
-
-### Add SPN
-
-```http
-POST /api/v1/misc/spn/add
-```
-
-**Request Body:**
-```json
-{
-  "accountname": "jdoe",
-  "spn": "HTTP/web.example.com"
-}
-```
-
-### Delete SPN
-
-```http
-DELETE /api/v1/misc/spn/delete
-```
-
-**Request Body:** Same as add.
+| Method | Path | Body / Params | Description |
+|--------|------|---------------|-------------|
+| `GET` | `/api/v1/misc/dbcheck` | `?fix` | Run database check |
+| `POST` | `/api/v1/misc/dbcheck/fix` | `DbcheckFixRequest` | Fix database errors (returns `task_id`) |
+| `GET` | `/api/v1/misc/ntacl` | `?file` | Get NT ACL |
+| `POST` | `/api/v1/misc/ntacl/set` | `SetNtaclRequest` | Set NT ACL |
+| `POST` | `/api/v1/misc/ntacl/sysvolreset` | — | Reset sysvol ACLs (returns `task_id`) |
+| `GET` | `/api/v1/misc/testparm` | — | Test configuration |
+| `GET` | `/api/v1/misc/processes` | — | List Samba processes |
+| `GET` | `/api/v1/misc/time` | — | Get server time |
+| `GET` | `/api/v1/misc/spn/list` | `?account` | List SPNs |
+| `POST` | `/api/v1/misc/spn/add` | `SpnRequest` | Add SPN |
+| `DELETE` | `/api/v1/misc/spn/delete` | `SpnRequest` | Delete SPN |
 
 ---
 
 ## Shell Execution
 
-### List Available Shells
+Router: `app/routers/shell.py` — prefix `/api/v1/shell`. Tag: `Shell`. Also see the WebSocket endpoint `/ws/shell` for streaming execution.
 
-```http
-GET /api/v1/shell/
+| Method | Path | Body / Params | Description |
+|--------|------|---------------|-------------|
+| `GET` | `/api/v1/shell/` | — | List available shells |
+| `POST` | `/api/v1/shell/exec` | `ShellExecRequest` | Execute a shell command |
+| `POST` | `/api/v1/shell/script` | `ShellScriptRequest` | Execute a multi-line script |
+| `POST` | `/api/v1/shell/script/file` | `multipart/form-data` (file) | Upload a script file and execute it |
+
+| WS | `/ws/shell` | — | Real-time shell execution over WebSocket |
+
+### Example
+
+```bash
+# Execute a shell command
+curl -k -X POST -H "X-API-Key: YOUR_KEY" -H "Content-Type: application/json" \
+  -d '{"command":"uptime","timeout":30}' \
+  https://127.0.0.1:8099/api/v1/shell/exec
 ```
-
-Returns available shell interpreters (`bash`, `python3`).
-
-### Execute Command
-
-```http
-POST /api/v1/shell/exec
-```
-
-**Required Permission:** `shell.execute`
-
-**Request Body:**
-```json
-{
-  "command": "ls -la /var/log/samba/",
-  "shell": "bash",
-  "sudo": false,
-  "timeout": 60
-}
-```
-
-**Response:**
-```json
-{
-  "status": "ok",
-  "exit_code": 0,
-  "stdout": "total 128\ndrwxr-xr-x...",
-  "stderr": "",
-  "command": "ls -la /var/log/samba/",
-  "shell": "bash",
-  "timeout": 60
-}
-```
-
-Blocked patterns: `rm -rf /`, `mkfs.`, `dd if=`, fork bombs. Dangerous commands (reboot, shutdown) trigger warnings but are allowed.
-
-### Execute Multi-line Script
-
-```http
-POST /api/v1/shell/script
-```
-
-**Request Body:**
-```json
-{
-  "script": "#!/bin/bash\necho 'Hello'\ndate",
-  "shell": "bash",
-  "sudo": false,
-  "timeout": 60
-}
-```
-
-### Execute Script File
-
-```http
-POST /api/v1/shell/script/file
-```
-
-Upload a script file and execute it. Supports multipart form upload with `shell`, `sudo`, `timeout`, and `auto_delete` parameters.
 
 ---
 
 ## Shell Project
 
-Shell Project provides a workspace-based environment for running commands with persistent state, archive extraction, scheduling, and webhook callbacks. Backed by PostgreSQL.
-
-### Create Project
-
-```http
-POST /api/v1/shell/projet/
-```
-
-**Required Permission:** `shell.projet.create`
-
-**Request Body:**
-```json
-{
-  "name": "my-project",
-  "description": "Test project",
-  "command": "python3 main.py",
-  "shell": "bash",
-  "env": {"PYTHONPATH": "/app"},
-  "encrypted_env": {"SECRET_KEY": "super-secret"},
-  "tags": ["test", "automation"],
-  "owner": "api-user",
-  "ttl_seconds": 3600,
-  "timeout": 300,
-  "callback_url": "https://example.com/webhook",
-  "working_dir": "src"
-}
-```
-
-The project workspace is created at `{SHELL_PROJET_BASE_DIR}/{name}/{id}`.
-
-### Upload Archive to Project
-
-```http
-POST /api/v1/shell/projet/{id}/upload
-```
-
-**Required Permission:** `shell.projet.upload`
-
-Upload a file or archive (.zip, .tar.gz, .tgz, .tar.bz2, .tar.xz, .tar, .gz, .7z) to the project workspace. Archives are automatically extracted with path traversal rejection.
-
-### Run Command in Project
-
-```http
-POST /api/v1/shell/projet/{id}/run
-```
-
-**Required Permission:** `shell.projet.run`
-
-**Request Body:**
-```json
-{
-  "command": "python3 main.py --verbose",
-  "shell": "bash",
-  "env": {"DEBUG": "1"},
-  "timeout": 120
-}
-```
-
-Only one command can run per project at a time (concurrent run protection).
-
-### Show Project Details
-
-```http
-GET /api/v1/shell/projet/{id}
-```
-
-**Required Permission:** `shell.projet.show`
-
-Also available as `GET /api/v1/shell/projet/show/{id}`.
-
-### List Projects
-
-```http
-GET /api/v1/shell/projet/list
-```
-
-**Required Permission:** `shell.projet.list`
-
-**Query Parameters:** `tag`, `owner`, `status` filters.
-
-### Download Project Workspace
-
-```http
-GET /api/v1/shell/projet/{id}/download
-```
-
-Downloads the workspace as a .zip file.
-
-### Delete Project
-
-```http
-DELETE /api/v1/shell/projet/{id}
-```
-
-**Required Permission:** `shell.projet.delete`
-
-### Abort Running Command
-
-```http
-POST /api/v1/shell/projet/{id}/abort
-```
-
-**Required Permission:** `shell.projet.abort`
-
-### Change Project Owner
-
-```http
-PATCH /api/v1/shell/projet/{id}/owner
-```
-
-**Request Body:**
-```json
-{
-  "new_owner": "user2"
-}
-```
-
-### Update Project Tags
-
-```http
-PATCH /api/v1/shell/projet/{id}/tags
-```
-
-**Request Body:**
-```json
-{
-  "tags": ["production", "critical"]
-}
-```
-
-### Create Schedule
-
-```http
-POST /api/v1/shell/projet/{id}/schedule
-```
-
-**Request Body:**
-```json
-{
-  "cron_expression": "0 */6 * * *",
-  "command_override": "python3 sync.py",
-  "enabled": true
-}
-```
-
-### List Schedules
-
-```http
-GET /api/v1/shell/projet/{id}/schedule
-```
-
-### Delete Schedule
-
-```http
-DELETE /api/v1/shell/projet/{id}/schedule/{schedule_id}
-```
-
-### Create Template
-
-```http
-POST /api/v1/shell/projet/template
-```
-
-**Request Body:**
-```json
-{
-  "name": "web-deploy",
-  "description": "Web deployment template",
-  "command": "bash deploy.sh",
-  "env": {"NODE_ENV": "production"},
-  "tags": ["deploy"]
-}
-```
-
-### Create Project from Template
-
-```http
-POST /api/v1/shell/projet/from-template/{template_id}
-```
-
-### List Templates
-
-```http
-GET /api/v1/shell/projet/templates
-```
-
-### Delete Template
-
-```http
-DELETE /api/v1/shell/projet/template/{template_id}
-```
-
-### Create Snapshot
-
-```http
-POST /api/v1/shell/projet/{id}/snapshot
-```
-
-### Rollback to Snapshot
-
-```http
-POST /api/v1/shell/projet/{id}/rollback/{snapshot_id}
-```
-
-### Get Project Audit Log
-
-```http
-GET /api/v1/shell/projet/{id}/audit
-```
-
-### Get Global Audit Log
-
-```http
-GET /api/v1/shell/projet/audit
-```
-
-### Batch Project Operations
-
-```http
-POST /api/v1/shell/projet/batch
-```
-
-### Project Health Check
-
-```http
-GET /api/v1/shell/projet/health
-```
+Routers: `app/routers/shell_projet.py` + `app/routers/shell_projet_files.py` — prefix `/api/v1/shell/projet`. Tag: `Shell Projects`. WebSocket: `/ws/projet/{projet_id}`.
+
+### Project lifecycle
+
+| Method | Path | Body / Params | Description |
+|--------|------|---------------|-------------|
+| `POST` | `/api/v1/shell/projet/` | `ShellProjetCreateRequest` | Create a shell project workspace |
+| `POST` | `/api/v1/shell/projet/{projet_id}/upload` | `multipart/form-data` | Upload file(s)/archive to project workspace |
+| `POST` | `/api/v1/shell/projet/{projet_id}/upload-multi` | `multipart/form-data` | Upload multiple files/archives (v1.6.7-3) |
+| `POST` | `/api/v1/shell/projet/{projet_id}/run` | `ShellProjetRunRequest` | Execute command in project workspace |
+| `POST` | `/api/v1/shell/projet/{projet_id}/abort` | — | Abort running command |
+| `GET` | `/api/v1/shell/projet/list` | — | List all projects |
+| `GET` | `/api/v1/shell/projet/health` | — | Shell projet system health check (v1.6.7-3) |
+| `GET` | `/api/v1/shell/projet/show/{projet_id}` | — | Show project details |
+| `GET` | `/api/v1/shell/projet/{projet_id}` | — | Show project details (alias) |
+| `GET` | `/api/v1/shell/projet/{projet_id}/download` | — | Download workspace as `.zip` |
+| `DELETE` | `/api/v1/shell/projet/{projet_id}` | — | Delete project workspace |
+
+### Owner & tags (v1.6.7-3)
+
+| Method | Path | Body | Description |
+|--------|------|------|-------------|
+| `PATCH` | `/api/v1/shell/projet/{projet_id}/owner` | `ShellProjetOwnerChangeRequest` | Transfer project ownership |
+| `PATCH` | `/api/v1/shell/projet/{projet_id}/tags` | `ShellProjetTagsUpdateRequest` | Update project tags/labels |
+
+### Scheduling (v1.6.7-4)
+
+| Method | Path | Body | Description |
+|--------|------|------|-------------|
+| `POST` | `/api/v1/shell/projet/{projet_id}/schedule` | schedule payload | Create a cron schedule |
+| `GET` | `/api/v1/shell/projet/{projet_id}/schedule` | — | List schedules |
+| `DELETE` | `/api/v1/shell/projet/{projet_id}/schedule/{schedule_id}` | — | Delete a schedule |
+
+### Templates (v1.6.7-4)
+
+| Method | Path | Body | Description |
+|--------|------|------|-------------|
+| `POST` | `/api/v1/shell/projet/template` | template payload | Create a project template |
+| `POST` | `/api/v1/shell/projet/from-template/{template_id}` | — | Create project from template |
+| `GET` | `/api/v1/shell/projet/templates` | — | List all templates |
+| `DELETE` | `/api/v1/shell/projet/template/{template_id}` | — | Delete a template |
+
+### Snapshots & audit (v1.6.7-4)
+
+| Method | Path | Body | Description |
+|--------|------|------|-------------|
+| `POST` | `/api/v1/shell/projet/{projet_id}/snapshot` | — | Create workspace snapshot |
+| `POST` | `/api/v1/shell/projet/{projet_id}/rollback/{snapshot_id}` | — | Rollback workspace to snapshot |
+| `GET` | `/api/v1/shell/projet/audit` | — | Global audit log |
+| `GET` | `/api/v1/shell/projet/{projet_id}/audit` | — | Project audit log |
+| `POST` | `/api/v1/shell/projet/batch` | batch payload | Batch project operations |
+
+### File operations (router `shell_projet_files.py`)
+
+| Method | Path | Body | Description |
+|--------|------|------|-------------|
+| `GET` | `/api/v1/shell/projet/{projet_id}/files` | — | List files in workspace |
+| `GET` | `/api/v1/shell/projet/{projet_id}/files/{file_path:path}` | — | Download a file |
+| `PUT` | `/api/v1/shell/projet/{projet_id}/files/{file_path:path}` | file body | Upload/overwrite a file |
+| `DELETE` | `/api/v1/shell/projet/{projet_id}/files/{file_path:path}` | — | Delete a file or directory |
+| `POST` | `/api/v1/shell/projet/{projet_id}/mkdir/{dir_path:path}` | — | Create a directory |
+
+| WS | `/ws/projet/{projet_id}` | — | Real-time stdout/stderr/status for a project execution |
+| WS | `/ws/projet` | — | All project events (dashboard) |
 
 ---
 
 ## Batch Operations
 
-### Execute Batch
+Router: `app/routers/batch.py` — prefix `/api/v1/batch`. Tag: `Batch`.
 
-```http
-POST /api/v1/batch/
+| Method | Path | Body | Description |
+|--------|------|------|-------------|
+| `POST` | `/api/v1/batch/` | `BatchRequest` | Execute batch operations (multi-step, with template resolution and rollback). Returns `BatchResponse`. |
+
+### Example
+
+```bash
+curl -k -X POST -H "X-API-Key: YOUR_KEY" -H "Content-Type: application/json" \
+  -d '{
+    "steps": [
+      {"method":"POST","path":"/api/v1/users/","body":{"username":"jdoe","password":"S3cret!"}},
+      {"method":"POST","path":"/api/v1/groups/dev/members","body":{"members":["jdoe"]}}
+    ],
+    "stop_on_error": true,
+    "rollback_on_error": true
+  }' \
+  https://127.0.0.1:8099/api/v1/batch/
 ```
-
-**Required Permission:** `batch.execute`
-
-Execute a sequence of operations with template resolution (`{{ step_id.field }}`).
-
-**Request Body:**
-```json
-{
-  "steps": [
-    {
-      "id": "create_user",
-      "method": "user.create",
-      "params": {
-        "username": "jdoe",
-        "password": "P@ssw0rd"
-      }
-    },
-    {
-      "id": "add_to_group",
-      "method": "group.addmembers",
-      "params": {
-        "groupname": "Developers",
-        "members": ["jdoe"]
-      }
-    }
-  ],
-  "stop_on_error": true,
-  "rollback_on_error": false
-}
-```
-
-**Supported Methods (60+):** `user.*`, `group.*`, `computer.*`, `contact.*`, `ou.*`, `dns.zone.*`, `dns.record.*`, `shell.exec`, `shell.script`, `misc.spn.*`, `misc.ntacl.*`, `domain.*`, `fsmo.show`, `drs.*`, `gpo.*`, `sites.*`, `delegation.*`, `service_account.*`, `auth.*`.
-
-**Blocked Methods (too dangerous):** `domain.backup.*`, `domain.join`, `domain.leave`, `domain.demote`, `domain.provision`, `gpo.backup`, `gpo.restore`, `misc.dbcheck*`, `misc.ntacl.sysvolreset`, `misc.testparm`.
-
-### Batch Request
-
-```http
-POST /api/v1/batch
-```
-
-**Required Permission:** `batch.execute`
-
-**Request Body:**
-```json
-{
-  "actions": [
-    {
-      "id": "step1",
-      "method": "user.create",
-      "params": {
-        "username": "jdoe",
-        "password": "P@ssw0rd123",
-        "surname": "Doe",
-        "given_name": "John"
-      }
-    },
-    {
-      "id": "step2",
-      "method": "group.addmembers",
-      "params": {
-        "groupname": "Developers",
-        "members": ["{{ step1.username }}"]
-      }
-    }
-  ],
-  "batch_id": "onboard-jdoe",
-  "rollback_on_failure": false,
-  "stop_on_failure": true,
-  "default_timeout": 30
-}
-```
-
-### Batch Action Fields
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `id` | string | No | Step identifier for template references (`{{ step_id.field }}`) |
-| `method` | string | Yes | Dot-notation method name (e.g. `user.create`, `dns.zone.create`) |
-| `params` | object | No | Parameters for the method; supports `{{ step_id.field }}` placeholders |
-| `timeout` | int | No | Per-action timeout (1-600s); overrides `default_timeout` |
-
-### Batch Options
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `actions` | array | — | Ordered list of actions (1-100 max) |
-| `batch_id` | string | Auto UUID | Custom prefix, available as `{{ batch_id }}` |
-| `rollback_on_failure` | bool | false | Attempt to undo successful steps on failure (best-effort) |
-| `stop_on_failure` | bool | true | Stop on first failure; if false, continue and mark `partial_failure` |
-| `default_timeout` | int | 30 | Default timeout for shell operations (1-600s) |
-
-### Supported Batch Methods (60+)
-
-**Users:** user.create, user.delete, user.enable, user.disable, user.unlock, user.setpassword, user.getpassword, user.list, user.show, user.getgroups, user.setexpiry, user.move, user.rename, user.addunixattrs, user.sensitive
-
-**Groups:** group.create, group.delete, group.addmembers, group.removemembers, group.listmembers, group.list, group.show, group.move, group.stats
-
-**Computers:** computer.create, computer.delete, computer.list, computer.show, computer.move
-
-**Contacts:** contact.create, contact.delete, contact.list, contact.show, contact.move, contact.rename
-
-**OUs:** ou.create, ou.delete, ou.list, ou.move, ou.rename
-
-**DNS:** dns.zone.create, dns.zone.delete, dns.zone.list, dns.zone.info, dns.record.create, dns.record.delete, dns.record.update, dns.record.list, dns.serverinfo, dns.zone.options
-
-**Shell:** shell.exec, shell.script
-
-**Misc:** misc.spn.add, misc.spn.delete, misc.spn.list, misc.ntacl.get, misc.ntacl.set
-
-**Domain:** domain.info, domain.level, domain.passwordsettings
-
-**FSMO:** fsmo.show
-
-**DRS:** drs.showrepl, drs.bind, drs.options, drs.replicate, drs.uptodateness
-
-**GPO:** gpo.list, gpo.create, gpo.delete, gpo.show, gpo.setlink, gpo.dellink, gpo.getinheritance, gpo.setinheritance
-
-**Sites:** sites.list, sites.create, sites.remove, sites.subnet.create, sites.subnet.remove
-
-**Delegation:** delegation.add, delegation.remove, delegation.for_account
-
-**Service Accounts:** service_account.create, service_account.delete, service_account.list, service_account.show, service_account.gmsa_members.add, service_account.gmsa_members.remove, service_account.gmsa_members.list
-
-**Auth Policies:** auth.silo.create, auth.silo.delete, auth.silo.list, auth.silo.show, auth.silo.members.add, auth.silo.members.remove, auth.policy.create, auth.policy.delete, auth.policy.list, auth.policy.show
-
-### Blocked Batch Methods
-
-These methods are NOT allowed in batch because they are too slow (background tasks) or too dangerous:
-- domain.backup.online, domain.backup.offline
-- domain.join, domain.leave, domain.demote, domain.provision
-- gpo.backup, gpo.restore
-- misc.dbcheck, misc.dbcheck.fix
-- misc.ntacl.sysvolreset, misc.testparm
 
 ---
 
 ## AI Assistant
 
-### AI Assistant (Task Builder)
+Router: `app/routers/ai.py` — prefix `/api/v1/ai`. Tag: `AI`. Polza.ai-powered.
 
-```http
-POST /api/v1/ai/assistant
-```
+### Core
 
-**Request Body:**
-```json
-{
-  "prompt": "Create 5 users for the marketing department and add them to the Marketing group",
-  "model": "openai/gpt-oss-120b",
-  "safe_mode": true
-}
-```
+| Method | Path | Body | Description |
+|--------|------|------|-------------|
+| `POST` | `/api/v1/ai/assistant` | `AIRequest` | AI Assistant for Task Builder (returns OpenAPI-based action plan) |
+| `POST` | `/api/v1/ai/sdb` | `AISdbRequest` | AI Assistant for SDB mode (generates SDB scripts) |
+| `POST` | `/api/v1/ai/agent` | `AIAgentRequest` | AI Agent with direct execution (can call any API + run shell commands) |
+| `GET` | `/api/v1/ai/schema` | — | Compressed OpenAPI schema for AI |
+| `GET` | `/api/v1/ai/config` | — | Current AI configuration |
+| `GET` | `/api/v1/ai/balance` | — | AI provider account balance |
+| `GET` | `/api/v1/ai/test` | — | AI connection diagnostics (v2.0.3) |
+| `GET` | `/api/v1/ai/info` | — | AI usage dashboard |
+| `GET` | `/api/v1/ai/system` | — | Get AI system configuration |
+| `PUT` | `/api/v1/ai/system` | `AISystemPromptUpdateRequest` | Update AI system configuration |
+| `GET` | `/api/v1/ai/data-schema` | — | Get AI data schema for web UI |
+| `POST` | `/api/v1/ai/pipeline/execute` | `AIPipelineConfig` | Execute AI pipeline |
+| `GET` | `/api/v1/ai/pipeline/templates` | — | Get pipeline templates |
 
-**Response:**
-```json
-{
-  "status": "ok",
-  "actions": [
-    {
-      "method": "user.create",
-      "params": {"username": "{{USER_INPUT}}", "password": "{{USER_INPUT}}"}
-    }
-  ],
-  "explanation": "I'll create 5 users and add them to the Marketing group...",
-  "model_used": "openai/gpt-oss-120b"
-}
-```
+### Chat sessions
 
-In **Safe Mode**, real values are replaced with `{{USER_INPUT}}` placeholders.
+| Method | Path | Body | Description |
+|--------|------|------|-------------|
+| `POST` | `/api/v1/ai/chat/` | `ChatCreateRequest` | Create a new AI chat session |
+| `GET` | `/api/v1/ai/chat/list` | — | List AI chat sessions |
+| `GET` | `/api/v1/ai/chat/{chat_id}` | — | Get chat session details |
+| `PUT` | `/api/v1/ai/chat/{chat_id}` | `ChatUpdateRequest` | Update chat session |
+| `DELETE` | `/api/v1/ai/chat/{chat_id}` | — | Delete a chat session |
+| `POST` | `/api/v1/ai/chat/{chat_id}/send` | `ChatMessageSend` | Send a message (returns full response) |
+| `POST` | `/api/v1/ai/chat/{chat_id}/stream` | `ChatMessageSend` | Send a message with **SSE streaming** (real-time agent steps) |
+| `GET` | `/api/v1/ai/chat/{chat_id}/history` | — | Get chat message history |
+| `GET` | `/api/v1/ai/chat/{chat_id}/info` | — | Chat session cost/usage summary |
 
-### AI Agent (Direct Execution)
-
-```http
-POST /api/v1/ai/agent
-```
-
-**Request Body:**
-```json
-{
-  "prompt": "List all disabled users and enable them",
-  "model": "openai/gpt-oss-120b",
-  "max_steps": 5
-}
-```
-
-The agent autonomously:
-1. Reads the OpenAPI schema to discover available endpoints
-2. Plans and executes tool calls (`execute_samba_api`, `execute_samba_api_as`, `execute_shell_command`, `save_file`, `read_file`)
-3. Feeds results back to the LLM for next-step planning
-4. Returns the final result with full audit trail
-
-### AI Agent Tools
-
-The AI agent has access to the following tools:
-
-| Tool | Description |
-|------|-------------|
-| `execute_samba_api` | Call any API endpoint using the admin API key (full access) |
-| `execute_samba_api_as` | Call API on behalf of a specific user (RBAC testing). Looks up user by username/ID, creates JWT token, makes request. Returns 403 if user lacks permission. |
-| `execute_shell_command` | Execute shell commands on the server |
-| `save_file` | Save/export data to files (CSV, JSON, XLSX, TXT) |
-| `read_file` | Read files from the server |
-| `manage_samba_share` | Create, edit, delete Samba file shares |
-| `manage_samba_config` | Read/modify smb.conf |
-| `system_admin` | System administration (services, logs, backups) |
-| `network_admin` | Network diagnostics |
-| `ai_skill_execute` | Execute AI skills |
-| `request_api_access` | Discover available endpoints by permission |
-| `manage_postgresql` | PostgreSQL database management |
-| `ldbsearch_ad` | Direct AD database queries via ldbsearch |
-| `data_import` | Import data from API, files, JSON |
-| `data_export` | Export to XLSX/CSV/JSON |
-| `data_transform` | Filter, sort, aggregate data |
-| `data_diagram` | Create charts/diagrams |
-
-**`execute_samba_api_as` — RBAC Testing (v1.9.6-4):**
-
-This tool allows the AI agent to make API calls on behalf of a specific management user, which is essential for testing role-based access control. The tool:
-1. Looks up the user by username or numeric user ID in the management database
-2. Gets their role and permissions
-3. Creates a temporary JWT access token for that user
-4. Makes the API call using that JWT token
-5. Returns the response (including 403 Forbidden if the user lacks the required permission)
-
-**Example:** Test that a `junior_admin` user cannot delete AD users:
-```
-execute_samba_api_as(
-  method="DELETE",
-  path="/api/v1/users/testuser",
-  as_user="junior_admin"
-)
-→ Response: http_status=403, "Role 'Junior Admin' does not have permission for DELETE /api/v1/users/testuser"
-```
-
-**Example:** Test that a `junior_admin` user can list users:
-```
-execute_samba_api_as(
-  method="GET",
-  path="/api/v1/users",
-  as_user="junior_admin"
-)
-→ Response: http_status=200, data=[...]
-```
-
-The `as_user` parameter accepts either a username string (e.g. `"junior_admin"`) or a numeric user ID (e.g. `"4"`).
-
-### Get AI Schema
-
-```http
-GET /api/v1/ai/schema
-```
-
-Returns the compressed OpenAPI schema used by the AI service.
-
-### Get AI Configuration
-
-```http
-GET /api/v1/ai/config
-```
-
-### AI Chat (Persistent Sessions)
-
-The AI Chat endpoints provide persistent, multi-turn conversation sessions with the AI assistant. Chat sessions, messages, and usage/cost tracking are stored in PostgreSQL.
-
-**Create Chat:**
-```http
-POST /api/v1/ai/chat/
-```
-
-**Request Body:**
-```json
-{
-  "title": "User Management Session",
-  "model": "deepseek/deepseek-v4-flash"
-}
-```
-
-**Send Message:**
-```http
-POST /api/v1/ai/chat/{chat_id}/send
-```
-
-**Request Body:**
-```json
-{
-  "content": "Create a Junior Admin role with user management permissions"
-}
-```
-
-**Stream Response:**
-```http
-POST /api/v1/ai/chat/{chat_id}/stream
-```
-
-Returns Server-Sent Events (SSE) stream for real-time token output.
-
-**Chat Endpoints:**
+### Exports
 
 | Method | Path | Description |
 |--------|------|-------------|
-| POST | `/ai/chat/` | Create new chat session |
-| GET | `/ai/chat/list` | List user's chat sessions |
-| GET | `/ai/chat/{chat_id}` | Get chat session details |
-| PUT | `/ai/chat/{chat_id}` | Update chat (title, archive) |
-| DELETE | `/ai/chat/{chat_id}` | Delete chat session |
-| POST | `/ai/chat/{chat_id}/send` | Send message (returns full response) |
-| POST | `/ai/chat/{chat_id}/stream` | Send message (SSE stream) |
-| GET | `/ai/chat/{chat_id}/history` | Get chat message history |
-| GET | `/ai/chat/{chat_id}/info` | Get chat info and cost summary |
+| `GET` | `/api/v1/ai/exports` | List all exported files with download links |
+| `GET` | `/api/v1/ai/exports/{filename}` | Download an exported file |
 
-### AI Info & Balance
+### Examples
 
-```http
-GET /api/v1/ai/info
-GET /api/v1/ai/balance
-GET /api/v1/ai/exports
-GET /api/v1/ai/exports/{filename}
+```bash
+# One-shot AI Assistant
+curl -k -X POST -H "X-API-Key: YOUR_KEY" -H "Content-Type: application/json" \
+  -d '{"prompt":"List all disabled users and re-enable them"}' \
+  https://127.0.0.1:8099/api/v1/ai/assistant
+
+# Streaming chat (SSE)
+curl -k -N -X POST -H "X-API-Key: YOUR_KEY" -H "Content-Type: application/json" \
+  -d '{"message":"Show me the latest 5 audit events"}' \
+  https://127.0.0.1:8099/api/v1/ai/chat/{chat_id}/stream
 ```
+
+---
+
+## Chat (REST + WebSocket)
+
+Router: `app/routers/chat.py` — prefix `/api/v1/chat`. Tag: `Chat`. WebSocket: `/ws/chat/{room_id}`. PostgreSQL-backed.
+
+### Rooms
+
+| Method | Path | Body | Description |
+|--------|------|------|-------------|
+| `GET` | `/api/v1/chat/rooms` | — | List my chat rooms |
+| `POST` | `/api/v1/chat/rooms` | `RoomCreateRequest` | Create a chat room |
+| `GET` | `/api/v1/chat/rooms/{room_id}` | — | Get chat room details |
+| `PUT` | `/api/v1/chat/rooms/{room_id}` | `RoomUpdateRequest` | Update chat room |
+| `DELETE` | `/api/v1/chat/rooms/{room_id}` | — | Delete chat room (owner only) |
+| `POST` | `/api/v1/chat/rooms/{room_id}/read` | — | Mark messages as read |
+| `POST` | `/api/v1/chat/rooms/{room_id}/mute` | — | Mute/unmute room notifications |
+| `GET` | `/api/v1/chat/unread` | — | Unread counts for all my rooms |
+
+### Members
+
+| Method | Path | Body | Description |
+|--------|------|------|-------------|
+| `GET` | `/api/v1/chat/rooms/{room_id}/members` | — | List room members |
+| `POST` | `/api/v1/chat/rooms/{room_id}/members` | `MemberAddRequest` | Add member to room |
+| `DELETE` | `/api/v1/chat/rooms/{room_id}/members/{user_id}` | — | Remove member from room |
+
+### Messages
+
+| Method | Path | Body | Description |
+|--------|------|------|-------------|
+| `GET` | `/api/v1/chat/rooms/{room_id}/messages` | `?limit&before_id` | List messages in room |
+| `POST` | `/api/v1/chat/rooms/{room_id}/messages` | `MessageSendRequest` | Send a text message |
+| `PUT` | `/api/v1/chat/messages/{msg_id}` | `MessageEditRequest` | Edit a message |
+| `DELETE` | `/api/v1/chat/messages/{msg_id}` | — | Delete a message (soft) |
+| `POST` | `/api/v1/chat/messages/{msg_id}/forward` | `ForwardRequest` | Forward a message to another room |
+| `GET` | `/api/v1/chat/messages/{msg_id}/read-by` | — | Who read this message |
+
+### Reactions, stars, pins
+
+| Method | Path | Body | Description |
+|--------|------|------|-------------|
+| `POST` | `/api/v1/chat/messages/{msg_id}/reactions` | `ReactionRequest` | Toggle emoji reaction |
+| `GET` | `/api/v1/chat/messages/{msg_id}/reactions` | — | List reactions on a message |
+| `POST` | `/api/v1/chat/messages/{msg_id}/star` | — | Star/unstar a message |
+| `GET` | `/api/v1/chat/stars` | — | List my starred messages |
+| `POST` | `/api/v1/chat/messages/{msg_id}/pin` | — | Pin a message |
+| `GET` | `/api/v1/chat/rooms/{room_id}/pinned` | — | List pinned messages |
+
+### Files & voice
+
+| Method | Path | Body | Description |
+|--------|------|------|-------------|
+| `POST` | `/api/v1/chat/rooms/{room_id}/files` | `multipart/form-data` | Upload a file and send as message |
+| `POST` | `/api/v1/chat/rooms/{room_id}/voice` | `multipart/form-data` (audio) | Upload a voice message |
+| `GET` | `/api/v1/chat/attachments/{att_id}` | — | Download a file attachment |
+
+### Search & scheduled
+
+| Method | Path | Body | Description |
+|--------|------|------|-------------|
+| `GET` | `/api/v1/chat/search` | `?q&room_id` | Search messages across all my chats |
+| `POST` | `/api/v1/chat/rooms/{room_id}/schedule` | `ScheduleRequest` | Schedule a message |
+| `GET` | `/api/v1/chat/scheduled` | — | List my pending scheduled messages |
+| `DELETE` | `/api/v1/chat/scheduled/{msg_id}` | — | Delete a scheduled message |
+
+### Audio calls
+
+| Method | Path | Body | Description |
+|--------|------|------|-------------|
+| `POST` | `/api/v1/chat/rooms/{room_id}/calls` | `CallInitiateRequest` | Initiate a call |
+| `POST` | `/api/v1/chat/calls/{call_id}/accept` | — | Accept a call |
+| `POST` | `/api/v1/chat/calls/{call_id}/reject` | — | Reject a call |
+| `POST` | `/api/v1/chat/calls/{call_id}/end` | — | End a call |
+| `POST` | `/api/v1/chat/calls/{call_id}/cancel` | — | Cancel a ringing call |
+| `GET` | `/api/v1/chat/rooms/{room_id}/calls` | — | List calls in a room |
+| `GET` | `/api/v1/chat/calls` | — | List my calls (all rooms) |
+
+### Admin
+
+| Method | Path | Body | Description |
+|--------|------|------|-------------|
+| `GET` | `/api/v1/chat/stats` | — | Chat statistics (admin) |
+| `POST` | `/api/v1/chat/cleanup` | — | Clean up files from deleted messages (admin) |
+| `POST` | `/api/v1/chat/retention` | — | Delete messages older than N days (admin) |
+
+### WebSocket
+
+| WS | `/ws/chat/{room_id}` | — | Real-time chat in a specific room |
 
 ---
 
 ## Management API (Admin Panel)
 
-The Management API provides user, API key, role, and permission management. All endpoints are under `/api/v1/mgmt/`.
+Router: `app/routers/mgmt.py` — prefix `/api/v1/mgmt`. Tag: `Management`. PostgreSQL-backed (`mgmt_users`, `mgmt_api_keys`, `mgmt_roles`, `mgmt_permissions`, `mgmt_audit_log`).
 
-### Management Users
+### Users
 
-| Method | Path | Description | Permission |
-|--------|------|-------------|------------|
-| GET | `/mgmt/users` | List management users | `mgmt.users.list` |
-| POST | `/mgmt/users` | Create management user | `mgmt.users.create` |
-| GET | `/mgmt/users/{user_id}` | Get user details | `mgmt.users.show` |
-| PUT | `/mgmt/users/{user_id}` | Update user | `mgmt.users.update` |
-| DELETE | `/mgmt/users/{user_id}` | Delete user (soft) | `mgmt.users.delete` |
-
-**Create User (JSON Body):**
-```json
-{
-  "username": "junior_admin",
-  "password": "SecurePass123!",
-  "role": "operator",
-  "full_name": "Junior Administrator",
-  "email": "junior@example.com"
-}
-```
-Only `username` and `password` are required. `role` defaults to `"operator"`.
-
-**Update User (JSON Body):**
-```json
-{
-  "role": "auditor",
-  "is_active": true,
-  "full_name": "Updated Name"
-}
-```
-All fields are optional. Only provided fields are updated.
+| Method | Path | Body | Description |
+|--------|------|------|-------------|
+| `GET` | `/api/v1/mgmt/users` | `?limit&offset&search` | List management users |
+| `POST` | `/api/v1/mgmt/users` | `UserCreateRequest` | Create management user |
+| `GET` | `/api/v1/mgmt/users/{user_id}` | — | Get management user |
+| `PUT` | `/api/v1/mgmt/users/{user_id}` | `UserUpdateRequest` | Update management user |
+| `DELETE` | `/api/v1/mgmt/users/{user_id}` | `?hard=false` | Delete management user (soft or hard) |
+| `POST` | `/api/v1/mgmt/users/{user_id}/enable` | — | Enable user |
+| `POST` | `/api/v1/mgmt/users/{user_id}/disable` | — | Disable user (soft) |
+| `POST` | `/api/v1/mgmt/users/{user_id}/purge` | — | Permanently delete user |
+| `POST` | `/api/v1/mgmt/users/{user_id}/reset-password` | `PasswordResetRequest` | Reset user password |
+| `GET` | `/api/v1/mgmt/users/{user_id}/keys` | — | List API keys of a user |
+| `POST` | `/api/v1/mgmt/users/bulk` | `BulkActionRequest` | Bulk action on users (enable/disable/purge) |
 
 ### API Keys
 
-| Method | Path | Description | Permission |
-|--------|------|-------------|------------|
-| GET | `/mgmt/keys` | List API keys | `mgmt.keys.list` |
-| POST | `/mgmt/keys` | Create API key | `mgmt.keys.create` |
-| GET | `/mgmt/keys/{key_id}` | Get key details | `mgmt.keys.show` |
-| PUT | `/mgmt/keys/{key_id}` | Update key | `mgmt.keys.update` |
-| DELETE | `/mgmt/keys/{key_id}` | Delete key | `mgmt.keys.delete` |
-| POST | `/mgmt/keys/{key_id}/rotate` | Rotate key | `mgmt.keys.rotate` |
-
-**Create API Key (JSON Body):**
-```json
-{
-  "user_id": 4,
-  "name": "junior-admin-key",
-  "role": "Junior Admin",
-  "expires_days": 90
-}
-```
-`user_id` and `name` are required. `role` defaults to `"operator"`. `expires_days` is optional (no expiry if omitted).
-
-**Update API Key (JSON Body):**
-```json
-{
-  "name": "updated-key-name",
-  "is_active": true,
-  "expires_days": 30
-}
-```
-All fields are optional. `expires_days` resets the expiry to N days from now.
-
-**Important:** The plaintext API key is returned only once on creation and rotation. Subsequent requests show only a truncated hash.
+| Method | Path | Body | Description |
+|--------|------|------|-------------|
+| `GET` | `/api/v1/mgmt/keys` | `?limit&offset` | List API keys |
+| `POST` | `/api/v1/mgmt/keys` | `ApiKeyCreateRequest` | Create API key |
+| `GET` | `/api/v1/mgmt/keys/{key_id}` | — | Get API key details |
+| `PUT` | `/api/v1/mgmt/keys/{key_id}` | `ApiKeyUpdateRequest` | Update API key |
+| `DELETE` | `/api/v1/mgmt/keys/{key_id}` | `?hard=false` | Delete API key (soft or hard) |
+| `POST` | `/api/v1/mgmt/keys/{key_id}/rotate` | — | Rotate API key |
+| `POST` | `/api/v1/mgmt/keys/{key_id}/enable` | — | Enable API key |
+| `POST` | `/api/v1/mgmt/keys/{key_id}/disable` | — | Disable API key (soft) |
+| `POST` | `/api/v1/mgmt/keys/{key_id}/purge` | — | Permanently delete API key |
+| `POST` | `/api/v1/mgmt/keys/bulk` | `BulkActionRequest` | Bulk action on API keys |
 
 ### Roles
 
-| Method | Path | Description | Permission |
-|--------|------|-------------|------------|
-| GET | `/mgmt/roles` | List all roles | `mgmt.roles.list` |
-| GET | `/mgmt/roles/{role_name}` | Get role details | `mgmt.roles.list` |
-| POST | `/mgmt/roles` | Create custom role | `mgmt.roles.create` |
-| PUT | `/mgmt/roles/{role_name}` | Update role | `mgmt.roles.update` |
-| DELETE | `/mgmt/roles/{role_name}` | Delete custom role | `mgmt.roles.delete` |
-
-Built-in roles (`admin`, `operator`, `auditor`) cannot be renamed or deleted.
-
-**Create Role Body:**
-```json
-{
-  "name": "dns-admin",
-  "description": "DNS administrator",
-  "permissions": ["dns.zonecreate", "dns.zonedelete", "dns.recordcreate", "dns.recorddelete", "dns.recordupdate"]
-}
-```
-
-**Update Role Body:**
-```json
-{
-  "name": "dns-admin-v2",
-  "description": "DNS administrator (updated)",
-  "permissions": ["dns.zonecreate", "dns.zonedelete", "dns.recordcreate", "dns.recorddelete", "dns.recordupdate", "dns.zonelist"]
-}
-```
-
-All fields are optional. The `name` field is used to rename a role. When renaming, the system also updates all references in `mgmt_users` and `mgmt_api_keys` tables to reflect the new role name.
-
-**List Management Users Parameters:** `role` (filter by role), `is_active` (filter by active status), `offset`, `limit`
+| Method | Path | Body | Description |
+|--------|------|------|-------------|
+| `GET` | `/api/v1/mgmt/roles` | — | List all roles |
+| `GET` | `/api/v1/mgmt/roles/{role_name}` | — | Get role details |
+| `POST` | `/api/v1/mgmt/roles` | `RoleCreateRequest` | Create custom role |
+| `PUT` | `/api/v1/mgmt/roles/{role_name}` | `RoleUpdateRequest` | Update role |
+| `DELETE` | `/api/v1/mgmt/roles/{role_name}` | — | Delete custom role (hard) |
+| `POST` | `/api/v1/mgmt/roles/{role_name}/enable` | — | Enable role |
+| `POST` | `/api/v1/mgmt/roles/{role_name}/disable` | — | Disable role (soft) |
+| `POST` | `/api/v1/mgmt/roles/{role_name}/gen-key` | `GenKeyForRoleRequest` | Generate API key for role |
+| `GET` | `/api/v1/mgmt/roles/{role_name}/users` | — | List users assigned to a role |
+| `GET` | `/api/v1/mgmt/roles/{role_name}/keys` | — | List API keys assigned to a role |
 
 ### Permissions
 
-| Method | Path | Description | Permission |
-|--------|------|-------------|------------|
-| GET | `/mgmt/permissions` | List all permissions | `mgmt.perms.list` |
-| POST | `/mgmt/permissions/assign` | Assign permissions to role | `mgmt.perms.assign` |
-| POST | `/mgmt/permissions/revoke` | Revoke permissions from role | `mgmt.perms.revoke` |
+| Method | Path | Body | Description |
+|--------|------|------|-------------|
+| `GET` | `/api/v1/mgmt/permissions` | — | List all available permissions |
+| `POST` | `/api/v1/mgmt/permissions/assign` | `PermissionAssignRequest` | Assign permissions to a role |
+| `POST` | `/api/v1/mgmt/permissions/revoke` | `PermissionRevokeRequest` | Revoke permissions from a role |
 
-### Audit Log
+### Stats & audit
 
-```http
-GET /api/v1/mgmt/audit
-```
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/v1/mgmt/stats` | Management dashboard stats |
+| `GET` | `/api/v1/mgmt/audit` | View audit log (with filters) |
 
-**Required Permission:** `mgmt.audit.view`
+### 2FA admin (router `twofa_admin.py`)
 
-**Query Parameters:** `user_id`, `action`, `endpoint`, `offset`, `limit`
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/v1/mgmt/users/{user_id}/2fa/status` | Check 2FA status for any user |
+| `POST` | `/api/v1/mgmt/users/{user_id}/2fa/setup` | Generate a new TOTP secret for any user |
+| `POST` | `/api/v1/mgmt/users/{user_id}/2fa/enable` | Enable 2FA for any user (`Admin2FAEnableRequest`) |
+| `POST` | `/api/v1/mgmt/users/{user_id}/2fa/disable` | Disable 2FA for any user (admin override) |
+| `POST` | `/api/v1/mgmt/users/{user_id}/2fa/reset` | Reset 2FA for any user (wipe stored secret) |
+| `GET` | `/api/v1/mgmt/2fa/enabled` | List all users with 2FA enabled |
+| `GET` | `/api/v1/mgmt/2fa/disabled` | List all users with a stored secret but 2FA disabled |
 
 ---
 
-## Dashboard
+## Ban Management
 
-### Full AD Dashboard
+Router: `app/routers/ban.py` — prefix `/api/v1/ban`. Tag: `Ban`. PostgreSQL-backed (`mgmt_bans` table). All endpoints are admin-only.
 
-```http
-GET /api/v1/dashboard/full
+| Method | Path | Body | Description |
+|--------|------|------|-------------|
+| `POST` | `/api/v1/ban` | `BanCreateRequest` | Create a ban (user or key) |
+| `POST` | `/api/v1/ban/unban` | `UnbanRequest` | Lift a ban (by id or by `target_type`+`target_name`) |
+| `POST` | `/api/v1/ban/unban/` | `UnbanRequest` | Convenience alias (hidden from schema) |
+| `GET` | `/api/v1/ban` | `?active&target_type&target_name&limit&offset` | List bans (with filters) |
+| `GET` | `/api/v1/ban/{ban_id}` | — | Show one ban by id |
+| `DELETE` | `/api/v1/ban/{ban_id}` | — | Hard-delete a ban record (history) — admin only |
+| `GET` | `/api/v1/ban/check/{target_type}/{target_name}` | — | Check if a target (user or key) is currently banned |
+
+### Required permissions (admin-only by default)
+
+- `ban.create` — `POST /api/v1/ban`
+- `ban.unban` — `POST /api/v1/ban/unban`
+- `ban.list` — `GET /api/v1/ban`
+- `ban.show` — `GET /api/v1/ban/{id}` and `GET /api/v1/ban/check/{type}/{name}`
+- `ban.delete` — `DELETE /api/v1/ban/{id}`
+
+### Behaviour
+
+- The **static bootstrap admin API key** (`SAMBA_API_KEY`) **cannot be banned** — this is intentional to prevent total lockout.
+- JWT-authenticated requests check `ban_db.is_user_banned(jwt_username)` after permission check.
+- API-key requests check both `is_key_banned(key_prefix)` (for mgmt-issued keys) and `is_user_banned(owner_username)` (the key's owner).
+- Bans have **lazy expiry** — expired bans are removed on next check.
+- Lifting a ban preserves the record in history (with `unbanned_at`).
+
+---
+
+## Webhooks
+
+Router: `app/routers/webhooks.py` — prefix `/api/v1/webhooks`. Tag: `Webhooks`.
+
+| Method | Path | Body | Description |
+|--------|------|------|-------------|
+| `GET` | `/api/v1/webhooks` | — | List webhooks |
+| `POST` | `/api/v1/webhooks` | `WebhookCreateRequest` | Register webhook |
+| `GET` | `/api/v1/webhooks/events` | — | List supported event types |
+| `GET` | `/api/v1/webhooks/{wh_id}` | — | Get webhook details |
+| `PUT` | `/api/v1/webhooks/{wh_id}` | `WebhookUpdateRequest` | Update webhook |
+| `DELETE` | `/api/v1/webhooks/{wh_id}` | — | Delete webhook |
+| `POST` | `/api/v1/webhooks/{wh_id}/test` | — | Send a test event to webhook |
+
+### Emitted event categories
+
+- `auth.login_success`, `auth.login_failure`
+- User lifecycle events (create/delete/enable/disable)
+- API key lifecycle events
+- Role changes
+- 2FA enable/disable/reset
+- Ban create/unban
+- (Future) shell projet lifecycle, chat events
+
+---
+
+## Backup
+
+Router: `app/routers/backup.py` — prefix `/api/v1/backup`. Tag: `Backup`.
+
+| Method | Path | Body | Description |
+|--------|------|------|-------------|
+| `POST` | `/api/v1/backup` | `BackupCreateRequest` | Create a backup (returns `task_id`) |
+| `GET` | `/api/v1/backup` | — | List backups |
+| `GET` | `/api/v1/backup/{filename}` | — | Download a backup file |
+| `DELETE` | `/api/v1/backup/{filename}` | — | Delete a backup file |
+| `POST` | `/api/v1/backup/restore` | `RestoreRequest` | Restore from a backup (returns `task_id`) |
+
+---
+
+## Dashboard & Charts
+
+Routers: `app/routers/dashboard.py` + `app/routers/dashboard_charts.py`. Prefixes: `/api/v1/dashboard` and `/api/v1/dashboard/charts`.
+
+### Overview
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/v1/dashboard/full` | Full AD dashboard (fast, via ldbsearch) |
+| `GET` | `/api/v1/dashboard/overview` | AD + system overview (one request, fast) |
+
+### Charts
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/v1/dashboard/charts/login-activity` | Login activity over time |
+| `GET` | `/api/v1/dashboard/charts/top-groups` | Top groups by member count |
+| `GET` | `/api/v1/dashboard/charts/os-distribution` | Computer OS distribution |
+| `GET` | `/api/v1/dashboard/charts/users-by-ou` | Users grouped by OU |
+| `GET` | `/api/v1/dashboard/charts/recent-events` | Recent audit events (timeline) |
+| `GET` | `/api/v1/dashboard/charts/mgmt-summary` | Management summary (counts) |
+
+---
+
+## SDB (Samba Database Query)
+
+Router: `app/routers/sdb.py` — prefix `/api/v1/sdb`. Tag: `SDB`. Direct LDB/TDB access (no samba-tool subprocess).
+
+| Method | Path | Body | Description |
+|--------|------|------|-------------|
+| `GET` | `/api/v1/sdb/databases` | — | List available Samba LDB databases |
+| `GET` | `/api/v1/sdb/full/{entity}` | — | Full list of records for an entity (web-friendly) |
+| `GET` | `/api/v1/sdb/info/{entity}` | `?fields` | Lightweight info about an entity (count or selected fields) |
+| `POST` | `/api/v1/sdb/query` | `SdbQueryRequest` | Execute SDB LDB query |
+| `POST` | `/api/v1/sdb/select` | `SdbSelectRequest` | SQL-like SELECT query |
+| `POST` | `/api/v1/sdb/show` | `SdbShowRequest` | Show AD object from database |
+| `POST` | `/api/v1/sdb/script` | `SdbScriptRequest` | Execute SDB script |
+| `GET` | `/api/v1/sdb/synthesis` | — | Analyze AD database schema |
+| `POST` | `/api/v1/sdb/export` | `SdbExportRequest` | One-step export AD data to ZIP |
+| `GET` | `/api/v1/sdb/export-download` | — | One-step export + immediate ZIP download |
+| `GET` | `/api/v1/sdb/exports` | — | List all SDB export files |
+| `GET` | `/api/v1/sdb/exports/{filename}` | — | Download an exported file |
+
+---
+
+## Report Generation
+
+Router: `app/routers/report.py` — prefix `/api/v1/report`. Tag: `Report`. Generates multi-sheet XLSX reports (8 sheets: users, groups, computers, contacts, OUs, DNS, GPO, audit).
+
+| Method | Path | Body | Description |
+|--------|------|------|-------------|
+| `POST` | `/api/v1/report/generate` | `ReportGenerateRequest` | Generate multi-sheet AD report (XLSX, 8 sheets) |
+| `GET` | `/api/v1/report/generate` | — | Generate AD report via GET (quick download) |
+| `GET` | `/api/v1/report/exports/{filename}` | — | Download exported report file |
+
+---
+
+## Runtime Configuration (CFG)
+
+Router: `app/routers/cfg.py` — prefix `/api/v1/cfg`. Tag: `CFG`. Runtime `.env` management with hot-reload. Persisting to `/etc/webadc/.env` for reboot-survival is supported via `POST /api/v1/cfg/persist`.
+
+| Method | Path | Body | Description |
+|--------|------|------|-------------|
+| `GET` | `/api/v1/cfg` | — | List all `.env` variables |
+| `GET` | `/api/v1/cfg/schema` | — | Schema of known settings (metadata) |
+| `GET` | `/api/v1/cfg/raw` | — | Download raw `.env` file |
+| `GET` | `/api/v1/cfg/{key}` | — | View one variable's value |
+| `PUT` | `/api/v1/cfg/{key}` | `CfgUpdateRequest` | Update or create a variable (hot-reload) |
+| `POST` | `/api/v1/cfg/bulk` | `CfgBulkUpdateRequest` | Bulk update (hot-reload) |
+| `DELETE` | `/api/v1/cfg/{key}` | — | Delete a variable (hot-reload) |
+| `POST` | `/api/v1/cfg/{key}/disable` | — | Disable a variable (set empty) |
+| `POST` | `/api/v1/cfg/{key}/enable` | — | Enable a variable (restore or set true) |
+| `POST` | `/api/v1/cfg/reload` | — | Force-reload settings from `.env` |
+| `POST` | `/api/v1/cfg/persist` | — | Save variables to `/etc/webadc/.env` (reboot survival) |
+
+---
+
+## Live Events (SSE)
+
+Router: `app/routers/live.py` — prefix `/api/v1/live`. Tag: `Live Updates`. Server-Sent Events stream for the management dashboard.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/v1/live/events` | SSE stream — emits user/key/role events in real time |
+| WS | `/ws/live` | WebSocket equivalent (preferred for richer event types) |
+
+### Example
+
+```bash
+curl -k -N -H "X-API-Key: YOUR_KEY" \
+  https://127.0.0.1:8099/api/v1/live/events
 ```
 
-**Required Permission:** `dashboard.full`
+---
 
-Fetches 8 data sources in parallel: users, groups, computers, contacts, OUs, GPOs, domain info, FSMO. Cached for 10 seconds.
+## Audit Export
 
-### AD + System Overview
+Router: `app/routers/audit_export.py` — prefix `/api/v1/mgmt/audit`. Tag: `Audit — Export`.
 
-```http
-GET /api/v1/dashboard/overview
+| Method | Path | Params | Description |
+|--------|------|--------|-------------|
+| `GET` | `/api/v1/mgmt/audit/export` | `?format=csv\|xlsx&from&to&user&action` | Export audit log to CSV or XLSX |
+
+### Example
+
+```bash
+# Export last 24h audit log as XLSX
+curl -k -H "X-API-Key: YOUR_KEY" -o audit.xlsx \
+  "https://127.0.0.1:8099/api/v1/mgmt/audit/export?format=xlsx"
 ```
-
-Combines AD data with system metrics (CPU, memory, disk, uptime) and Samba stats. Cached for 30 seconds.
 
 ---
 
 ## Task Management
 
-### Get Task Status
+Background task tracking (in-memory `TaskManager` + WebSocket hooks). Long-running operations (backup, GPO restore, dbcheck, sysvolreset, etc.) return a `task_id` immediately.
 
-```http
-GET /api/v1/tasks/{task_id}
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/v1/tasks` | List all tasks |
+| `GET` | `/api/v1/tasks/{task_id}` | Get task status by task ID |
+| WS | `/ws/tasks/{task_id}` | Real-time updates for a single task |
+| WS | `/ws/tasks` | All task updates (dashboard) |
+
+### Example
+
+```bash
+# Start an online backup (returns task_id)
+TASK_ID=$(curl -k -s -X POST -H "X-API-Key: YOUR_KEY" -H "Content-Type: application/json" \
+  -d '{"server":"dc1.almaz.local"}' \
+  https://127.0.0.1:8099/api/v1/domain/backup/online | jq -r .task_id)
+
+# Poll status
+curl -k -H "X-API-Key: YOUR_KEY" \
+  https://127.0.0.1:8099/api/v1/tasks/$TASK_ID
+
+# Or subscribe via WebSocket
+wscat -k -H "Authorization: Bearer eyJ..." \
+  wss://127.0.0.1:8099/ws/tasks/$TASK_ID
 ```
-
-**Required Permission:** `tasks.view`
-
-**Response:**
-```json
-{
-  "task_id": "abc-123",
-  "status": "COMPLETED",
-  "output": "...",
-  "error": null,
-  "created_at": "2026-05-16T10:00:00Z",
-  "completed_at": "2026-05-16T10:00:05Z"
-}
-```
-
-Task statuses: `PENDING`, `RUNNING`, `COMPLETED`, `FAILED`
-
-### List All Tasks
-
-```http
-GET /api/v1/tasks
-```
-
-**Required Permission:** `tasks.list`
 
 ---
 
 ## Data Models Reference
 
-### Common Models
+Pydantic models live in `app/models/`. The most commonly used request/response models:
 
-#### APIResponse
-```json
-{
-  "status": "string",
-  "message": "string"
-}
-```
+### Auth
+- `LoginRequest{username, password}`
+- `RefreshRequest{refresh_token}`
+- `TokenResponse{access_token, refresh_token, token_type, expires_in, role, permissions}`
+- `MeResponse{status, auth_method, username, role, permissions, expires_at}`
+- `CheckCredentialsRequest{username?, password?}`
 
-#### SuccessResponse
-```json
-{
-  "status": "ok",
-  "message": "string"
-}
-```
+### 2FA
+- `TwoFAEnableRequest{totp_code}`
+- `TwoFADisableRequest{password}`
+- `TwoFAVerifyRequest{temp_token, totp_code}`
+- `Admin2FAEnableRequest{totp_code?, force?}`
 
-#### ErrorResponse
-```json
-{
-  "status": "error",
-  "message": "string",
-  "details": "any (optional)"
-}
-```
+### Users
+- `UserCreateRequest{username, given_name?, surname?, password?, ou?, email?, ...}`
+- `UserPasswordRequest{password, must_change_at_next_logon?}`
+- `UserSetExpiryRequest{expiry_date}`
+- `UserAddUnixAttrsRequest{uid, gid, shell?, home_dir?}`
+- `UserSensitiveRequest{sensitive: bool}`
+- `UserEditRequest{...}` (LDAP attributes)
 
-#### PaginatedResponse
-```json
-{
-  "status": "ok",
-  "message": "string",
-  "items": [],
-  "total": 150,
-  "offset": 0,
-  "limit": 100
-}
-```
+### Groups
+- `GroupCreateRequest{groupname, ou?, description?}`
+- `GroupMembersRequest{members: [str]}`
+- `GroupMoveRequest{new_ou}`
 
-#### TaskResponse
-```json
-{
-  "message": "string",
-  "task_id": "uuid",
-  "result_url": "/api/v1/tasks/{task_id}"
-}
-```
+### Computers / Contacts / OUs
+- `ComputerCreateRequest{computername, ou?}`
+- `ComputerMoveRequest{new_ou}`
+- `ContactCreateRequest{contactname, ou?, ...}`
+- `ContactMoveRequest{new_ou}`
+- `ContactRenameRequest{new_name}`
+- `OUCreateRequest{name, ou?}`
+- `OUMoveRequest{new_parent_dn}`
+- `OURenameRequest{new_name}`
 
-#### LoginRequest
-```json
-{
-  "username": "string (required)",
-  "password": "string (required)"
-}
-```
+### Domain
+- `DomainLevelSetRequest{level}` — one of `2000/2003/2008/2008_R2/2012/2012_R2/2016`
+- `PasswordSettingsSetRequest{...}`
+- `TrustCreateRequest{domain, trust_type?, ...}`
+- `BackupRequest{server, ...}`
+- `DemoteRequest{...}`
+- `ForceActionRequest{force: bool}`
 
-#### TokenResponse
-```json
-{
-  "access_token": "string",
-  "refresh_token": "string",
-  "token_type": "bearer",
-  "expires_in": 1800,
-  "role": "string",
-  "permissions": ["string"]
-}
-```
+### DNS
+- `DNSZoneCreateRequest{zone, zone_type?}`
+- `DNSRecordCreateRequest{name, type, data, ttl?}`
+- `DNSRecordDeleteRequest{name, type, data?}`
+- `DNSRecordUpdateRequest{name, type, old_data, new_data}`
 
-#### MeResponse
-```json
-{
-  "status": "ok",
-  "auth_method": "jwt|api_key|credentials",
-  "username": "string",
-  "role": "string",
-  "permissions": ["string"],
-  "expires_at": "ISO-8601"
-}
-```
+### GPO
+- `GpoCreateRequest{displayname, domain?}`
+- `GpoLinkRequest{ou, enforced?, ...}`
+- `GpoUnlinkRequest{ou}`
+- `GpoSetInheritRequest{inherit: bool}`
+- `GpoBackupRequest{directory, ...}`
+- `GpoRestoreRequest{directory, ...}`
+
+### FSMO / DRS
+- `FsmoTransferRequest{role, server}`
+- `FsmoSeizeRequest{role, server}`
+- `DrsReplicateRequest{source, destination, partition}`
+
+### Sites
+- `SiteCreateRequest{name}`
+- `SubnetCreateRequest{network, site}`
+- `SubnetSetSiteRequest{network, site}`
+
+### Service Accounts
+- `CreateServiceAccountRequest{accountname, ...}`
+- `GmsaMembersRequest{members: [str]}`
+
+### Auth Policies
+- `CreateSiloRequest{name, ...}`
+- `CreatePolicyRequest{name, ...}`
+- `SiloMemberRequest{account}`
+
+### Delegation
+- `DelegationAccountService{account, service?}`
+
+### Misc
+- `DbcheckFixRequest{...}`
+- `SetNtaclRequest{file, acl, ...}`
+- `SpnRequest{account, spn}`
+
+### Shell
+- `ShellExecRequest{command, timeout?}`
+- `ShellScriptRequest{script, timeout?}`
+
+### Shell Project
+- `ShellProjetCreateRequest{name, ...}`
+- `ShellProjetRunRequest{command, timeout?}`
+- `ShellProjetOwnerChangeRequest{owner}`
+- `ShellProjetTagsUpdateRequest{tags: [str]}`
+
+### Batch
+- `BatchRequest{steps: [Step], stop_on_error?, rollback_on_error?}`
+- `BatchResponse{results: [...], status, ...}`
+
+### AI
+- `AIRequest{prompt, ...}`
+- `AISdbRequest{prompt, ...}`
+- `AIAgentRequest{prompt, max_steps?, ...}`
+- `ChatCreateRequest{title?}`
+- `ChatUpdateRequest{title}`
+- `ChatMessageSend{message, ...}`
+- `AISystemPromptUpdateRequest{system_prompt}`
+- `AIPipelineConfig{...}`
+
+### Chat
+- `RoomCreateRequest{name, members?}`
+- `RoomUpdateRequest{name?}`
+- `MemberAddRequest{user_id}`
+- `MessageSendRequest{text, reply_to_id?}`
+- `MessageEditRequest{text}`
+- `ReactionRequest{emoji}`
+- `ForwardRequest{to_room_id}`
+- `ScheduleRequest{text, send_at}`
+- `CallInitiateRequest{...}`
+
+### Ban
+- `BanCreateRequest{target_type: "user"|"key", target_name, reason?, duration_minutes?}`
+- `UnbanRequest{ban_id? OR target_type+target_name}`
+
+### Webhooks
+- `WebhookCreateRequest{url, events, ...}`
+- `WebhookUpdateRequest{url?, events?, ...}`
+
+### Backup
+- `BackupCreateRequest{...}`
+- `RestoreRequest{filename}`
+
+### SDB
+- `SdbQueryRequest{database, filter?, ...}`
+- `SdbSelectRequest{table, columns?, where?, ...}`
+- `SdbShowRequest{database, dn}`
+- `SdbScriptRequest{script}`
+- `SdbExportRequest{entities, ...}`
+
+### Report
+- `ReportGenerateRequest{...}`
+
+### CFG
+- `CfgUpdateRequest{value}`
+- `CfgBulkUpdateRequest{updates: {key: value}}`
+
+### Management
+- `UserCreateRequest{username, password, role, ...}`
+- `UserUpdateRequest{...}`
+- `PasswordResetRequest{password}`
+- `ApiKeyCreateRequest{name, role, expires_at?, ...}`
+- `ApiKeyUpdateRequest{...}`
+- `RoleCreateRequest{name, permissions: [str]}`
+- `RoleUpdateRequest{permissions: [str]}`
+- `GenKeyForRoleRequest{...}`
+- `PermissionAssignRequest{role, permissions: [str]}`
+- `PermissionRevokeRequest{role, permissions: [str]}`
+- `BulkActionRequest{ids: [int], action}`
+
+### Common
+- `ErrorResponse{status: "error", message, details?}`
 
 ---
 
 ## Permissions Reference
 
-Complete list of all 150+ permissions organized by category:
+The full permission catalogue is available at runtime via `GET /api/v1/mgmt/permissions`. Permissions are resolved from `(method, path)` by `app.permissions.resolve_permission`. Below is the category breakdown:
 
-### Users (21 permissions)
-| Permission | Description |
-|-----------|-------------|
-| `user.full` | Access /full fast endpoint |
-| `user.list` | List all users |
-| `user.create` | Create user accounts |
-| `user.show` | View user details |
-| `user.delete` | Delete user accounts |
-| `user.enable` | Enable user accounts |
-| `user.disable` | Disable user accounts |
-| `user.unlock` | Unlock user accounts |
-| `user.setpassword` | Set user passwords |
-| `user.getpassword` | Retrieve user passwords |
-| `user.getgroups` | View user group membership |
-| `user.setexpiry` | Set account expiry |
-| `user.setprimarygroup` | Change primary group |
-| `user.addunixattrs` | Add Unix attributes |
-| `user.sensitive` | Set sensitive flag |
-| `user.move` | Move user to different OU |
-| `user.rename` | Rename user account |
-| `user.getkerberosticket` | Get Kerberos ticket |
-| `user.search` | Search users |
-| `user.import` | Import users from CSV |
-| `user.export` | Export users |
-
-### Groups (11 permissions)
-| Permission | Description |
-|-----------|-------------|
-| `group.full` | Access /full fast endpoint |
-| `group.list` | List all groups |
-| `group.create` | Create groups |
-| `group.show` | View group details |
-| `group.delete` | Delete groups |
-| `group.stats` | View group statistics |
-| `group.addmembers` | Add members to group |
-| `group.removemembers` | Remove members from group |
-| `group.listmembers` | List group members |
-| `group.move` | Move group to different OU |
-| `group.rename` | Rename group |
-
-### Computers (6 permissions)
-`computer.full`, `computer.list`, `computer.create`, `computer.show`, `computer.delete`, `computer.move`
-
-### Contacts (8 permissions)
-`contact.full`, `contact.list`, `contact.create`, `contact.show`, `contact.delete`, `contact.move`, `contact.rename`, `contact.search`
-
-### OUs (10 permissions)
-`ou.full`, `ou.list`, `ou.create`, `ou.delete`, `ou.move`, `ou.rename`, `ou.listobjects`, `ou.tree`, `ou.stats`, `ou.search`
-
-### DNS (11 permissions)
-`dns.serverinfo`, `dns.zonelist`, `dns.zoneinfo`, `dns.zonecreate`, `dns.zonedelete`, `dns.recordlist`, `dns.recordcreate`, `dns.recorddelete`, `dns.recordupdate`, `dns.rorecords`, `dns.zoneoptions`
-
-### GPO (14 permissions)
-`gpo.full`, `gpo.list`, `gpo.create`, `gpo.show`, `gpo.delete`, `gpo.deletebyname`, `gpo.link`, `gpo.unlink`, `gpo.getinherit`, `gpo.setinherit`, `gpo.backup`, `gpo.restore`, `gpo.fetch`
-
-### Domain (12 permissions)
-`domain.full`, `domain.info`, `domain.level`, `domain.passwordsettings`, `domain.schemas`, `domain.provision`, `domain.join`, `domain.demote`, `domain.rename`, `domain.trustlist`, `domain.trustcreate`, `domain.trustdelete`
-
-### DRS (5 permissions)
-`drs.showrepl`, `drs.bind`, `drs.unbind`, `drs.options`, `drs.kcc`
-
-### Sites (5 permissions)
-`sites.list`, `sites.create`, `sites.show`, `sites.delete`, `sites.subnetlist`
-
-### FSMO (5 permissions)
-`fsmo.full`, `fsmo.show`, `fsmo.seize`, `fsmo.transfer`, `fsmo.roles`
-
-### Schema (3 permissions)
-`schema.list`, `schema.show`, `schema.query`
-
-### Delegation (3 permissions)
-`delegation.list`, `delegation.set`, `delegation.delete`
-
-### Service Accounts (4 permissions)
-`serviceaccount.list`, `serviceaccount.create`, `serviceaccount.show`, `serviceaccount.delete`
-
-### Auth Policies (5 permissions)
-`authpolicy.list`, `authpolicy.show`, `authpolicy.create`, `authpolicy.delete`, `authpolicy.update`
-
-### Shell (2 permissions)
-`shell.execute`, `shell.sudo`
-
-### Shell Project (7 permissions)
-`shell.projet.create`, `shell.projet.run`, `shell.projet.show`, `shell.projet.list`, `shell.projet.delete`, `shell.projet.upload`, `shell.projet.abort`
-
-### Batch (2 permissions)
-`batch.execute`, `batch.status`
-
-### Management (17 permissions)
-`mgmt.users.list`, `mgmt.users.create`, `mgmt.users.show`, `mgmt.users.update`, `mgmt.users.delete`, `mgmt.keys.list`, `mgmt.keys.create`, `mgmt.keys.show`, `mgmt.keys.update`, `mgmt.keys.delete`, `mgmt.keys.rotate`, `mgmt.audit.view`, `mgmt.roles.list`, `mgmt.roles.create`, `mgmt.roles.update`, `mgmt.roles.delete`, `mgmt.perms.list`, `mgmt.perms.assign`, `mgmt.perms.revoke`
-
-### Dashboard (1 permission)
-`dashboard.full`
-
-### System (4 permissions)
-`system.health`, `system.stats`, `system.metrics`, `system.tasks`
-
-### Tasks (2 permissions)
-`tasks.list`, `tasks.view`
-
-### Auth (2 permissions)
-`auth.me`, `auth.check`
-
-### Misc (3 permissions)
-`misc.time`, `misc.processes`, `misc.testparm`
-
----
-
-## Default Role Permissions
-
-### Admin
-All 180+ permissions — full system access.
-
-### Operator (Read-only)
-All read permissions including:
-- All `/full` fast endpoints
-- All `list`, `show`, `get`, `stats`, `tree`, `search` operations
-- System health, stats, metrics
-- Task listing and viewing
-- Auth me/check
-- Misc time, processes, testparm
-
-### Auditor
-Same as Operator plus `mgmt.audit.view` (access to audit log).
-
----
-
-## Quick Start
-
-### 1. Start the Server
-
-```bash
-# Set required environment variables
-export SAMBA_API_KEY="your-secret-api-key"
-
-# Optional: configure JWT, CORS, etc.
-export SAMBA_JWT_SECRET_KEY="your-jwt-secret"
-export SAMBA_CORS_ORIGINS="https://admin.example.com"
-
-# Run the server
-python -m uvicorn app.main:app --host 0.0.0.0 --port 8099
-```
-
-### 2. Test Health
-
-```bash
-curl http://localhost:8099/health
-```
-
-### 3. Authenticate
-
-```bash
-# API Key
-curl -H "X-API-Key: your-secret-api-key" http://localhost:8099/api/v1/users/
-
-# JWT Login
-TOKEN=$(curl -s -X POST http://localhost:8099/api/v1/auth/login \
-  -H "Content-Type: application/json" \
-  -d '{"username":"admin","password":"your-secret-api-key"}' | jq -r '.access_token')
-
-curl -H "Authorization: Bearer $TOKEN" http://localhost:8099/api/v1/users/
-```
-
-### 4. Common Operations
-
-```bash
-# List users
-curl -H "X-API-Key: $KEY" http://localhost:8099/api/v1/users/
-
-# Create a user
-curl -X POST -H "X-API-Key: $KEY" -H "Content-Type: application/json" \
-  http://localhost:8099/api/v1/users/ \
-  -d '{"username":"jdoe","password":"P@ssw0rd"}'
-
-# Get domain info
-curl -H "X-API-Key: $KEY" http://localhost:8099/api/v1/domain/info
-
-# Full dashboard
-curl -H "X-API-Key: $KEY" http://localhost:8099/api/v1/dashboard/overview
-```
-
----
-
-*Documentation generated from source code analysis of Samba API Server v pr-a.1.1*
+| Category | Permissions (examples) | Default roles |
+|----------|------------------------|---------------|
+| **Users** | `user.list`, `user.show`, `user.create`, `user.delete`, `user.enable`, `user.disable`, `user.unlock`, `user.password`, `user.move`, `user.rename`, `user.groups`, `user.expiry`, `user.primarygroup`, `user.unixattrs`, `user.sensitive`, `user.getpassword`, `user.kerberos`, `user.edit`, `user.search`, `user.import`, `user.export`, `user.batch` | admin: all / operator: read + most write / auditor: read |
+| **Groups** | `group.list`, `group.show`, `group.create`, `group.delete`, `group.members.add`, `group.members.remove`, `group.members.list`, `group.move`, `group.stats` | similar |
+| **Computers** | `computer.list`, `computer.show`, `computer.create`, `computer.delete`, `computer.move` | similar |
+| **Contacts** | `contact.list`, `contact.show`, `contact.create`, `contact.delete`, `contact.move`, `contact.rename` | similar |
+| **OUs** | `ou.list`, `ou.create`, `ou.delete`, `ou.move`, `ou.rename`, `ou.objects`, `ou.tree`, `ou.search`, `ou.stats`, `ou.subtree` | similar |
+| **Domain** | `domain.info`, `domain.level.get`, `domain.level.set`, `domain.passwordsettings.get/set`, `domain.trust.create/delete/list/namespaces/validate`, `domain.backup.online/offline`, `domain.kds.root-key.create/list`, `domain.exportkeytab`, `domain.join`, `domain.leave`, `domain.demote`, `domain.claim.types` | admin only for write ops |
+| **DNS** | `dns.serverinfo`, `dns.zone.list/show/create/delete`, `dns.record.list/create/delete/update`, `dns.rorecords`, `dns.options`, `dns.cache.invalidate` | admin only for write ops |
+| **GPO** | `gpo.list`, `gpo.show`, `gpo.create`, `gpo.delete`, `gpo.link/unlink`, `gpo.inherit.get/set`, `gpo.backup`, `gpo.restore`, `gpo.fetch` | similar |
+| **FSMO** | `fsmo.show`, `fsmo.transfer`, `fsmo.seize` | admin only for transfer/seize |
+| **DRS** | `drs.showrepl`, `drs.replicate`, `drs.uptodateness`, `drs.bind`, `drs.options` | similar |
+| **Sites** | `site.list/show/create/delete`, `subnet.list/show/create/delete`, `subnet.set-site` | similar |
+| **Schema** | `schema.attribute.show`, `schema.class.show` | read-only |
+| **Delegation** | `delegation.add`, `delegation.remove`, `delegation.show` | admin only |
+| **Service Accounts** | `service-account.list/show/create/delete`, `service-account.gmsa-members.add/remove/list` | admin only |
+| **Auth Policies** | `auth.silo.list/show/create/delete`, `auth.silo.member.add/remove`, `auth.policy.list/show/create/delete` | admin only |
+| **Misc** | `misc.dbcheck`, `misc.dbcheck.fix`, `misc.ntacl.get/set`, `misc.ntacl.sysvolreset`, `misc.testparm`, `misc.processes`, `misc.time`, `misc.spn.list/add/delete` | admin only for write ops |
+| **Shell** | `shell.execute`, `shell.script`, `shell.script.file` | admin only |
+| **Shell Project** | `shell.projet.create`, `shell.projet.run`, `shell.projet.upload`, `shell.projet.list/show/delete`, `shell.projet.download`, `shell.projet.abort`, `shell.projet.schedule.*`, `shell.projet.template.*`, `shell.projet.snapshot.*`, `shell.projet.audit`, `shell.projet.batch`, `shell.projet.file.*`, `shell.projet.owner`, `shell.projet.tags` | admin only |
+| **Batch** | `batch.execute` | admin only |
+| **AI** | `ai.assistant`, `ai.sdb`, `ai.agent`, `ai.chat.*`, `ai.config`, `ai.balance`, `ai.test`, `ai.info`, `ai.system.get/set`, `ai.exports.list/download`, `ai.schema`, `ai.pipeline.execute`, `ai.pipeline.templates` | admin only |
+| **Chat** | `chat.room.list/show/create/update/delete`, `chat.member.add/remove/list`, `chat.message.send/edit/delete/list`, `chat.message.forward`, `chat.message.reaction.*`, `chat.message.star`, `chat.message.pin`, `chat.file.upload`, `chat.voice.upload`, `chat.attachment.download`, `chat.search`, `chat.schedule.*`, `chat.call.*`, `chat.read`, `chat.mute`, `chat.unread`, `chat.stats`, `chat.cleanup`, `chat.retention` | all authenticated users |
+| **Management** | `mgmt.users.*`, `mgmt.keys.*`, `mgmt.roles.*`, `mgmt.permissions.assign/revoke`, `mgmt.stats`, `mgmt.audit.view`, `mgmt.2fa.*` | admin only |
+| **Ban** | `ban.create`, `ban.unban`, `ban.list`, `ban.show`, `ban.delete` | **admin only** (not granted to operator/auditor) |
+| **Webhooks** | `webhook.list/show/create/update/delete/test`, `webhook.events` | admin only |
+| **Backup** | `backup.create/list/download/delete/restore` | admin only |
+| **Dashboard** | `dashboard.full`, `dashboard.overview`, `dashboard.charts.*` | all read roles |
+| **SDB** | `sdb.databases`, `sdb.full`, `sdb.info`, `sdb.query`, `sdb.select`, `sdb.show`, `sdb.script`, `sdb.synthesis`, `sdb.export.*` | admin only |
+| **Report** | `report.generate`, `report.download` | admin only |
+| **CFG** | `cfg.list`, `cfg.schema`, `cfg.raw`, `cfg.get`, `cfg.update`, `cfg.bulk`, `cfg.delete`, `cfg.disable`, `cfg.enable`, `cfg.reload`, `cfg.persist` | **admin only** |
+| **Live** | `live.events` | all authenticated users |
+| **Audit Export** | `mgmt.audit.export` | admin + auditor |
+| **System** | `system.stats` | all authenticated users |
+| **Tasks** | `task.list`, `task.show` | all authenticated users |

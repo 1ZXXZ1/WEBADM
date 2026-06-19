@@ -340,6 +340,34 @@ class Settings(BaseSettings):
         default=60,
         description="Sliding window size in seconds for rate limiting.",
     )
+    RATE_LIMIT_PER_USER_PER_MIN: int = Field(
+        default=0,
+        description=(
+            "v2.3: Per-user global rate limit (across all endpoint groups). "
+            "0 = disabled. When > 0, every authenticated user gets at most "
+            "this many requests per window. Useful for fair-share between "
+            "users on a shared server."
+        ),
+    )
+
+    # ── v2.3 new features ─────────────────────────────────────────────
+    BACKUP_DIR: str = Field(
+        default="/var/lib/webadc/backups",
+        description="Directory for backup archives (sam.ldb + mgmt DB).",
+    )
+    BULK_MAX_ROWS: int = Field(
+        default=100,
+        description="Max rows per bulk-users API call.",
+    )
+    ENV_ENCRYPTION_ENABLED: bool = Field(
+        default=False,
+        description=(
+            "v2.3: When True, sensitive .env values (*PASSWORD*, *SECRET*, "
+            "*API_KEY*, *TOKEN*) are encrypted at rest with AES-256 (Fernet). "
+            "Encrypted values are prefixed with 'enc::' on write and "
+            "transparently decrypted on read."
+        ),
+    )
 
     # ── Cache (v2.7) ───────────────────────────────────────────────────
     CACHE_ENABLED: bool = Field(

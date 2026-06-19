@@ -8,22 +8,22 @@ SdbClient - главный класс для работы с базами Samba 
 import os
 from typing import List, Optional, Dict, Any
 
-from sdb.config import get_ldb_path, list_databases, LDB_DATABASES, SQL_TABLES
-from sdb.parser.ldif import LdifRecord, parse_ldif_string, parse_ldif_file
-from sdb.parser.script import ScriptParser, ScriptCommand, CommandType
-from sdb.connectors.ldb import LdbConnector
-from sdb.connectors.sambatool import SambaToolConnector
-from sdb.formatters import get_formatter
-from sdb.commands.query import QueryCommands
-from sdb.commands.user import UserCommands
-from sdb.commands.group import GroupCommands
-from sdb.commands.computer import ComputerCommands
-from sdb.commands.dns_cmd import DnsCommands
-from sdb.commands.share import ShareCommands
-from sdb.commands.privilege import PrivilegeCommands
-from sdb.commands.registry import RegistryCommands
-from sdb.commands.idmap import IdmapCommands
-from sdb.script_engine import ScriptEngine
+from app.sdb_lib.config import get_ldb_path, list_databases, LDB_DATABASES, SQL_TABLES
+from app.sdb_lib.parser.ldif import LdifRecord, parse_ldif_string, parse_ldif_file
+from app.sdb_lib.parser.script import ScriptParser, ScriptCommand, CommandType
+from app.sdb_lib.connectors.ldb import LdbConnector
+from app.sdb_lib.connectors.sambatool import SambaToolConnector
+from app.sdb_lib.formatters import get_formatter
+from app.sdb_lib.commands.query import QueryCommands
+from app.sdb_lib.commands.user import UserCommands
+from app.sdb_lib.commands.group import GroupCommands
+from app.sdb_lib.commands.computer import ComputerCommands
+from app.sdb_lib.commands.dns_cmd import DnsCommands
+from app.sdb_lib.commands.share import ShareCommands
+from app.sdb_lib.commands.privilege import PrivilegeCommands
+from app.sdb_lib.commands.registry import RegistryCommands
+from app.sdb_lib.commands.idmap import IdmapCommands
+from app.sdb_lib.script_engine import ScriptEngine
 
 
 class SdbClient:
@@ -272,7 +272,7 @@ class SdbClient:
         include_dn: bool = True,
     ):
         """Преобразовать записи в pandas DataFrame."""
-        from sdb.formatters.dataframe_fmt import DataframeFormatter
+        from app.sdb_lib.formatters.dataframe_fmt import DataframeFormatter
 
         if records is None:
             records = self._engine.last_records

@@ -1,4 +1,4 @@
-# SDB API — Документация v1.9-3-2
+# SDB API — Документация v-a.1.2
 
 ## Обзор
 
@@ -11,7 +11,17 @@ SDB (Samba Database Query Tool) — это REST API для прямого дос
 - **NumPy-free** — XLSX экспорт использует openpyxl напрямую, без pandas/NumPy
 - **ZIP скачивание** — автоматическая упаковка в ZIP архив
 - **Авто-fallback** — при ошибке NumPy X86_V2 автоматически переключается на ldbsearch
-- **AI SKILL** — интегрирован как SKILL для AI агента (1 шаг вместо 24)
+- **Web-friendly эндпоинты** — `/full/{N}` и `/info/{N}` возвращают только данные, нужные вебу
+
+### Что нового в v-a.1.2
+
+- ✅ **Удалён SDB TaskBuilder** (`/api/v1/sdb/tasks`, `/templates`, `/schedules`, `/executions`).
+  Все соответствующие файлы (`app/routers/sdb_taskbuilder.py`,
+  `app/services/sdb_taskbuilder_service.py`,
+  `docs/WebSDB_TaskBuilder_Spec.md`) удалены из проекта.
+- ✅ **Добавлены web-friendly эндпоинты** `/full/{N}` и `/info/{N}` для
+  удобной работы из веб-фронтенда: можно запросить `count`, конкретные
+  поля или полный набор данных за один вызов.
 
 ---
 
@@ -46,36 +56,6 @@ curl -X GET http://192.168.104.12:8099/api/v1/sdb/databases \
       "description": "Main AD database",
       "path": "/var/lib/samba/private/sam.ldb",
       "exists": true
-    },
-    "share": {
-      "description": "Share definitions",
-      "path": "/var/lib/samba/share.ldb",
-      "exists": true
-    },
-    "privilege": {
-      "description": "Privilege definitions",
-      "path": "/var/lib/samba/private/privilege.ldb",
-      "exists": true
-    },
-    "hklm": {
-      "description": "Registry HKLM",
-      "path": "/var/lib/samba/registry/hklm.ldb",
-      "exists": true
-    },
-    "idmap": {
-      "description": "ID mapping",
-      "path": "/var/lib/samba/private/idmap.ldb",
-      "exists": true
-    },
-    "secrets": {
-      "description": "Secrets",
-      "path": "/var/lib/samba/private/secrets.ldb",
-      "exists": true
-    },
-    "dns": {
-      "description": "DNS zones",
-      "path": "/var/lib/samba/private/dns/sam.ldb",
-      "exists": true
     }
   }
 }
@@ -83,7 +63,228 @@ curl -X GET http://192.168.104.12:8099/api/v1/sdb/databases \
 
 ---
 
-### 2. POST /query — Прямой LDB запрос
+### 2. GET /full/{entity} — Полный список записей сущности ⭐ (web-friendly)
+
+Возвращает полный список записей указанного типа сущности.
+Эндпоинт оптимизирован для веб-фронтенда: можно запросить конкретные
+атрибуты, `*` (ВСЕ атрибуты LDAP) или оставить curated-набор.
+
+**Поддерживаемые типы сущностей:**
+
+| Entity | Описание | Принимаемые алиасы |
+|--------|----------|-------------------|
+| `users` | Пользователи | `user`, `пользователь`, `пользователи` |
+| `groups` | Группы | `group`, `группа`, `группы` |
+| `computers` | Компьютеры | `computer`, `компьютер`, `компьютеры` |
+| `ous` | Организационные подразделения | `ou`, `organizationalunit`, `организационное подразделение` |
+| `gpos` | Групповые политики | `gpo`, `grouppolicy`, `групповая политика` |
+| `contacts` | Контакты | `contact`, `контакт`, `контакты` |
+| `dns` | DNS записи | `dns_records`, `dnsrecords`, `dns запись` |
+
+**Параметры запроса (Query):**
+
+| Параметр | По умолч. | Описание |
+|----------|-----------|----------|
+| `fields` | `*` | Список атрибутов через запятую. `*` = ВСЕ атрибуты LDAP (без фильтрации). Если параметр не указан — curated-набор для веба |
+| `where` | `""` | Необязательный фильтр вида `cn=*Admin*` |
+| `exclude` | `""` | Исключить sAMAccountName через запятую |
+| `limit` | `0` | Максимум записей (0 = все) |
+
+**Три режима работы параметра `fields`:**
+
+| Значение `fields` | Режим (`fields_mode`) | Что вернётся |
+|-------------------|----------------------|--------------|
+| (не указан) | `curated` | Минимальный набор полей, удобный для веба |
+| `*` | `all` | **ВСЕ атрибуты LDAP**, которые есть у записей (без фильтрации) |
+| `sAMAccountName,cn,mail` | `specific` | Только указанные поля |
+
+**Curated-набор атрибутов (когда `fields` не указан):**
+
+| Entity | Поля |
+|--------|------|
+| `users` | sAMAccountName, cn, displayName, mail, department, title, whenCreated, lastLogon, userAccountControl, memberOf, dn |
+| `groups` | sAMAccountName, cn, description, groupType, member, whenCreated, dn |
+| `computers` | sAMAccountName, cn, operatingSystem, operatingSystemVersion, lastLogon, whenCreated, userAccountControl, dn |
+| `ous` | ou, name, description, whenCreated, dn |
+| `gpos` | cn, displayName, gPCFileSysPath, versionNumber, whenCreated, dn |
+| `contacts` | cn, displayName, mail, telephoneNumber, whenCreated, dn |
+| `dns` | dc, dnsRecord, objectClass, dn |
+
+**Запрос 1: ВСЕ атрибуты LDAP всех пользователей (без фильтрации)**
+```bash
+curl -X GET "http://192.168.104.12:8099/api/v1/sdb/full/users?fields=*" \
+  -H "X-API-Key: YOUR_API_KEY"
+```
+
+**Запрос 2: curated-набор всех групп (короткий ответ для дашборда)**
+```bash
+curl -X GET "http://192.168.104.12:8099/api/v1/sdb/full/groups" \
+  -H "X-API-Key: YOUR_API_KEY"
+```
+
+**Запрос 3: только имя и почта**
+```bash
+curl -X GET "http://192.168.104.12:8099/api/v1/sdb/full/users?fields=sAMAccountName,mail" \
+  -H "X-API-Key: YOUR_API_KEY"
+```
+
+**Ответ (для `fields=*`, режим `all`):**
+```json
+{
+  "success": true,
+  "type": "users",
+  "count": 17,
+  "fields_mode": "all",
+  "fields": ["dn", "cn", "sn", "givenName", "sAMAccountName", "mail",
+             "displayName", "userAccountControl", "memberOf", "objectClass",
+             "objectSid", "objectGUID", "whenCreated", "whenChanged",
+             "lastLogon", "lastLogonTimestamp", "logonCount", "badPwdCount",
+             "primaryGroupID", "userPrincipalName", "...все остальные атрибуты LDAP..."],
+  "data": [
+    {
+      "dn": "CN=Administrator,CN=Users,DC=corp,DC=local",
+      "cn": "Administrator",
+      "sAMAccountName": "Administrator",
+      "mail": "",
+      "objectClass": ["top", "person", "organizationalPerson", "user"],
+      "...": "..."
+    }
+  ]
+}
+```
+
+**Ответ (для curated, когда `fields` не указан):**
+```json
+{
+  "success": true,
+  "type": "users",
+  "count": 17,
+  "fields_mode": "curated",
+  "fields": ["sAMAccountName", "cn", "displayName", "mail", "department", "title",
+             "whenCreated", "lastLogon", "userAccountControl", "memberOf", "dn"],
+  "data": [
+    {
+      "sAMAccountName": "admin",
+      "cn": "Administrator",
+      "displayName": "Administrator",
+      "mail": "",
+      "department": "",
+      "title": "",
+      "whenCreated": "20230101120000.0Z",
+      "lastLogon": "133...",
+      "userAccountControl": "512",
+      "memberOf": "CN=Domain Admins,CN=Users,DC=corp,DC=local",
+      "dn": "CN=Administrator,CN=Users,DC=corp,DC=local"
+    }
+  ]
+}
+```
+
+---
+
+### 3. GET /info/{entity} — Лёгкая информация о сущности ⭐ (web-friendly)
+
+Возвращает лёгкую сводку по сущности — только то, что нужно вебу.
+По умолчанию возвращает только `count` (для дашбордов и счётчиков).
+
+**Параметры запроса (Query):**
+
+| Параметр | По умолч. | Описание |
+|----------|-----------|----------|
+| `fields` | `count` | `count` (только счётчик), `*` (ВСЕ атрибуты LDAP), или список конкретных атрибутов |
+| `where` | `""` | Необязательный фильтр (применяется только если `fields != count`) |
+| `exclude` | `""` | Исключить sAMAccountName через запятую |
+| `limit` | `0` | Максимум записей (применяется только если `fields != count`) |
+
+**Три режима работы параметра `fields`:**
+
+| Значение `fields` | Режим (`fields_mode`) | Что вернётся |
+|-------------------|----------------------|--------------|
+| `count` (или не указан) | — | Только счётчик: `{success, type, count}` |
+| `*` | `all` | **ВСЕ атрибуты LDAP** (без фильтрации) |
+| `sAMAccountName,mail` | `specific` | Только указанные поля |
+
+#### Режим 1: `fields=count` (по умолчанию) — только количество
+
+```bash
+curl -X GET "http://192.168.104.12:8099/api/v1/sdb/info/users" \
+  -H "X-API-Key: YOUR_API_KEY"
+```
+
+```json
+{
+  "success": true,
+  "type": "users",
+  "count": 17
+}
+```
+
+#### Режим 2: `fields=*` — ВСЕ атрибуты LDAP (без фильтрации)
+
+```bash
+curl -X GET "http://192.168.104.12:8099/api/v1/sdb/info/users?fields=*" \
+  -H "X-API-Key: YOUR_API_KEY"
+```
+
+```json
+{
+  "success": true,
+  "type": "users",
+  "count": 17,
+  "fields_mode": "all",
+  "fields": ["dn", "cn", "sAMAccountName", "mail", "objectClass",
+             "userAccountControl", "memberOf", "..."],
+  "data": [
+    {"dn": "...", "cn": "...", "sAMAccountName": "admin", "...": "..."}
+  ]
+}
+```
+
+#### Режим 3: конкретные поля — лёгкий список
+
+Например, вебу нужны только имена и почты пользователей:
+
+```bash
+curl -X GET "http://192.168.104.12:8099/api/v1/sdb/info/users?fields=sAMAccountName,mail" \
+  -H "X-API-Key: YOUR_API_KEY"
+```
+
+```json
+{
+  "success": true,
+  "type": "users",
+  "count": 17,
+  "fields_mode": "specific",
+  "fields": ["sAMAccountName", "mail"],
+  "data": [
+    {"sAMAccountName": "admin", "mail": ""},
+    {"sAMAccountName": "ivan", "mail": "ivan@corp.local"}
+  ]
+}
+```
+
+**Типичный сценарий для дашборда:**
+
+1. Сначала получаем только счётчики (дёшево, можно параллельно):
+   ```bash
+   GET /info/users         → {"count": 17}
+   GET /info/groups        → {"count": 24}
+   GET /info/computers     → {"count": 5}
+   ```
+
+2. При клике на «Пользователи» подгружаем минимальный набор для списка:
+   ```bash
+   GET /info/users?fields=sAMAccountName,cn,mail
+   ```
+
+3. При открытии карточки пользователя — ВСЕ атрибуты LDAP:
+   ```bash
+   GET /full/users?fields=*&where=sAMAccountName=admin
+   ```
+
+---
+
+### 4. POST /query — Прямой LDB запрос
 
 Выполняет запрос к LDB базе данных с LDAP фильтром.
 
@@ -131,7 +332,7 @@ curl -X POST http://192.168.104.12:8099/api/v1/sdb/query \
 
 ---
 
-### 3. POST /select — SQL-подобный SELECT
+### 5. POST /select — SQL-подобный SELECT
 
 Выполняет SQL-подобный запрос к таблицам AD.
 
@@ -174,7 +375,7 @@ curl -X POST http://192.168.104.12:8099/api/v1/sdb/select \
 
 ---
 
-### 4. POST /show — Показать объект AD
+### 6. POST /show — Показать объект AD
 
 Показывает детали объекта AD напрямую из базы (без samba-tool).
 
@@ -191,7 +392,7 @@ curl -X POST http://192.168.104.12:8099/api/v1/sdb/show \
 
 ---
 
-### 5. POST /script — Выполнить SDB скрипт
+### 7. POST /script — Выполнить SDB скрипт
 
 Выполняет SDB DSL скрипт с несколькими командами.
 
@@ -219,7 +420,7 @@ curl -X POST http://192.168.104.12:8099/api/v1/sdb/script \
 
 ---
 
-### 6. GET /synthesis — Анализ схемы AD
+### 8. GET /synthesis — Анализ схемы AD
 
 Анализирует схему базы данных Samba AD.
 
@@ -233,7 +434,7 @@ curl -X GET "http://192.168.104.12:8099/api/v1/sdb/synthesis?subcmd=SCHEMA" \
 
 ---
 
-### 7. POST /export — One-step экспорт ⭐
+### 9. POST /export — One-step экспорт ⭐
 
 **Главный эндпоинт для экспорта.** Запрос + форматирование + сохранение + ZIP скачивание за один вызов.
 
@@ -302,7 +503,7 @@ curl -X POST http://192.168.104.12:8099/api/v1/sdb/export \
 
 ---
 
-### 8. GET /export-download — Мгновенное скачивание ZIP
+### 10. GET /export-download — Мгновенное скачивание ZIP
 
 Тот же экспорт, но сразу возвращает файл как streaming download (без JSON ответа).
 
@@ -331,7 +532,7 @@ curl -O -J "http://192.168.104.12:8099/api/v1/sdb/export-download?filename=users
 
 ---
 
-### 9. GET /exports — Список файлов экспорта
+### 11. GET /exports — Список файлов экспорта
 
 Возвращает список всех экспортированных файлов.
 
@@ -365,7 +566,7 @@ curl -X GET http://192.168.104.12:8099/api/v1/sdb/exports \
 
 ---
 
-### 10. GET /exports/{filename} — Скачать файл
+### 12. GET /exports/{filename} — Скачать файл
 
 Скачивает экспортированный файл по имени.
 

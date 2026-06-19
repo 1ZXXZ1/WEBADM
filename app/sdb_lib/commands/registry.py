@@ -4,8 +4,8 @@
 
 from typing import List, Optional, Dict
 
-from sdb.parser.ldif import LdifRecord
-from sdb.connectors.ldb import LdbConnector
+from app.sdb_lib.parser.ldif import LdifRecord
+from app.sdb_lib.connectors.ldb import LdbConnector
 
 
 class RegistryCommands:

@@ -17,7 +17,7 @@ import os
 import glob
 from typing import List, Optional
 
-from sdb.config import (
+from app.sdb_lib.config import (
     LDB_DATABASES, OUTPUT_FORMATS, SAMBA_TOOL_HELP,
     SAMBA_TOOL_SUBCOMMANDS, SQL_TABLES,
 )
@@ -158,7 +158,7 @@ class SdbCompleter:
         self.sdb_commands = sorted([
             "USE", "SELECT", "WHERE", "FORMAT", "OUTPUT",
             "TOOL", "SHOW", "SET", "FIELDS", "LIMIT",
-            "SEARCH", "DATAFRAME", "HELP", "IMPORT", "CREATE",
+            "SEARCH", "DATAFRAME", "FULL", "HELP", "IMPORT", "CREATE",
             "ENABLE", "DISABLE", "DELETE", "LIST", "SYNTHESIS",
             "quit", "exit",
         ])
@@ -295,6 +295,11 @@ class SdbCompleter:
         if full_upper.startswith("SYNTHESIS"):
             after_syn = full_line[9:].lstrip() if len(full_line) > 9 else ""
             return self._complete_from_list(after_syn, SYNTHESIS_TYPES)
+
+        # FULL [N]
+        if full_upper.startswith("FULL"):
+            # FULL принимает опциональный номер
+            return []
 
         # Начало команды
         return [c + " " for c in self.sdb_commands

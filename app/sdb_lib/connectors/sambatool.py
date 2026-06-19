@@ -37,7 +37,7 @@ import subprocess
 import shlex
 from typing import List, Optional, Dict, Any
 
-from sdb.config import SAMBA_TOOL_PATH, SAMBA_TOOL_SUBCOMMANDS
+from app.sdb_lib.config import SAMBA_TOOL_PATH, SAMBA_TOOL_SUBCOMMANDS
 
 
 class SambaToolResult:

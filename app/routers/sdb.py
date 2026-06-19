@@ -581,6 +581,390 @@ async def list_databases(
     return result
 
 
+# ═══════════════════════════════════════════════════════════════════════
+#  /sdb/full/{N} and /sdb/info/{N} — web-friendly entity endpoints
+#  v-a.1.2: Lightweight, web-oriented read endpoints that return only
+#           the data the web frontend actually needs. No SDB script
+#           engine required — uses ldbsearch directly (NumPy-safe).
+#
+#  Supported entity types N (case-insensitive):
+#    users, groups, computers, ous, gpos, contacts, dns
+# ═══════════════════════════════════════════════════════════════════════
+
+
+# Map entity type → LDAP filter used to fetch all records of that type.
+_ENTITY_FILTERS: Dict[str, str] = {
+    "users":     "(&(objectClass=user)(sAMAccountType=805306368))",
+    "groups":    "(objectClass=group)",
+    "computers": "(objectClass=computer)",
+    "ous":       "(objectClass=organizationalUnit)",
+    "gpos":      "(objectClass=groupPolicyContainer)",
+    "contacts":  "(objectClass=contact)",
+    "dns":       "(objectClass=dnsNode)",
+}
+
+# Map entity type → recommended default fields for /full/ when client asks
+# for "*" or omits the fields parameter. This keeps responses predictable
+# and avoids dumping dozens of internal LDAP attributes into the web UI.
+_DEFAULT_FULL_FIELDS: Dict[str, List[str]] = {
+    "users":     ["sAMAccountName", "cn", "displayName", "mail",
+                  "department", "title", "whenCreated", "lastLogon",
+                  "userAccountControl", "memberOf", "dn"],
+    "groups":    ["sAMAccountName", "cn", "description", "groupType",
+                  "member", "whenCreated", "dn"],
+    "computers": ["sAMAccountName", "cn", "operatingSystem",
+                  "operatingSystemVersion", "lastLogon", "whenCreated",
+                  "userAccountControl", "dn"],
+    "ous":       ["ou", "name", "description", "whenCreated", "dn"],
+    "gpos":      ["cn", "displayName", "gPCFileSysPath",
+                  "versionNumber", "whenCreated", "dn"],
+    "contacts":  ["cn", "displayName", "mail", "telephoneNumber",
+                  "whenCreated", "dn"],
+    "dns":       ["dc", "dnsRecord", "objectClass", "dn"],
+}
+
+# Aliases accepted from clients (Russian + English variants).
+_ENTITY_ALIASES: Dict[str, str] = {
+    "user": "users", "users": "users",
+    "пользователь": "users", "пользователи": "users",
+    "group": "groups", "groups": "groups",
+    "группа": "groups", "группы": "groups",
+    "computer": "computers", "computers": "computers",
+    "компьютер": "computers", "компьютеры": "computers",
+    "ou": "ous", "ous": "ous",
+    "organizationalunit": "ous",
+    "организационное подразделение": "ous",
+    "организационные подразделения": "ous",
+    "gpo": "gpos", "gpos": "gpos",
+    "grouppolicy": "gpos",
+    "групповая политика": "gpos",
+    "групповые политики": "gpos",
+    "contact": "contacts", "contacts": "contacts",
+    "контакт": "contacts", "контакты": "contacts",
+    "dns": "dns", "dns_records": "dns", "dnsrecords": "dns",
+    "dns запись": "dns", "dns записи": "dns",
+}
+
+
+def _normalize_entity(n: str) -> str:
+    """Normalize user-provided entity name to canonical key.
+
+    Returns the canonical key (e.g. 'users') or raises HTTPException(404)
+    if the entity type is unknown.
+    """
+    if not n:
+        raise HTTPException(status_code=404, detail="Entity type required")
+    key = n.strip().lower()
+    canonical = _ENTITY_ALIASES.get(key, key)
+    if canonical not in _ENTITY_FILTERS:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"Unknown entity type '{n}'. "
+                f"Supported: {', '.join(sorted(_ENTITY_FILTERS.keys()))} "
+                f"(also Russian names accepted)."
+            ),
+        )
+    return canonical
+
+
+def _parse_fields_param(fields: str) -> List[str]:
+    """Parse comma-separated fields param into a list of attribute names."""
+    if not fields:
+        return []
+    return [f.strip() for f in fields.split(",") if f.strip()]
+
+
+def _fetch_entity_rows(
+    entity: str,
+    attrs: Optional[List[str]],
+    where: str = "",
+    exclude: str = "",
+    limit: int = 0,
+) -> List[Dict[str, Any]]:
+    """Fetch records for an entity type, NumPy-safe (uses ldbsearch)."""
+    filter_expr = _ENTITY_FILTERS[entity]
+
+    rows = _query_records(
+        database="sam",
+        filter_expr=filter_expr,
+        attrs=attrs,
+        base_dn=None,
+        exclude=exclude or "",
+    )
+
+    # Apply optional WHERE filter (client-side post-filter, like /select)
+    if where:
+        rows = [r for r in rows if _match_where(r, where)]
+
+    # Apply limit
+    if limit and limit > 0:
+        rows = rows[:limit]
+
+    return rows
+
+
+def _project_fields(
+    rows: List[Dict[str, Any]],
+    fields: List[str],
+) -> List[Dict[str, Any]]:
+    """Project each row down to the requested fields (preserve order)."""
+    if not fields or fields == ["*"]:
+        return rows
+    return [{k: rec.get(k, "") for k in fields} for rec in rows]
+
+
+@router.get(
+    "/full/{entity}",
+    summary="Полный список записей сущности (web-friendly)",
+    description=(
+        "Возвращает полный список записей указанного типа сущности.\n\n"
+        "Поддерживаемые типы: `users`, `groups`, `computers`, `ous`, "
+        "`gpos`, `contacts`, `dns` (принимаются также русские названия).\n\n"
+        "Параметр `fields`:\n"
+        "- не указан → curated-набор (минимальный набор полей, удобный для веба)\n"
+        "- `*` → ВСЕ атрибуты LDAP, которые есть у записей (без фильтрации)\n"
+        "- `name,mail,...` → только конкретные поля\n\n"
+        "Эндпоинт полностью NumPy-safe: использует ldbsearch напрямую, "
+        "без SDB script engine и без pandas/numpy."
+    ),
+)
+async def sdb_full_entity_endpoint(
+    request: Request,
+    entity: str,
+    api_key: ApiKeyDep,                                  # ← BEFORE default params (fixes SyntaxError)
+    fields: str = Query(
+        default="*",
+        description=(
+            "Список атрибутов через запятую. "
+            "`*` = все атрибуты LDAP (без фильтрации). "
+            "Если параметр не указан — curated-набор для веба."
+        ),
+    ),
+    where: str = Query(
+        default="",
+        description="Необязательный фильтр вида `cn=*Admin*` (post-filter).",
+    ),
+    exclude: str = Query(
+        default="",
+        description="Исключить sAMAccountName через запятую (например Administrator,Guest).",
+    ),
+    limit: int = Query(
+        default=0,
+        ge=0,
+        description="Максимум записей (0 = все).",
+    ),
+) -> dict:
+    """Полный список записей сущности с возможностью выбора атрибутов.
+
+    Логика работы параметра `fields`:
+      • не указан (или пустой)        → curated-набор для веба
+      • `*`                            → ВСЕ атрибуты LDAP (без фильтрации)
+      • `sAMAccountName,cn,mail`       → только указанные поля
+    """
+    canonical = _normalize_entity(entity)
+    requested = _parse_fields_param(fields)
+
+    # Three modes for fields parameter:
+    #   - not specified (empty) → curated default set
+    #   - '*' → ALL LDAP attributes (no projection, no attr filter)
+    #   - specific list → fetch & project only those
+    if not requested:
+        # curated mode: query specific attrs + project to them in order
+        attrs_for_query = list(_DEFAULT_FULL_FIELDS.get(canonical) or [])
+        project_fields = list(attrs_for_query)
+        fields_mode = "curated"
+    elif requested == ["*"]:
+        # ALL attributes: pass attrs=None to ldbsearch (returns everything),
+        # do not project — preserve whatever LDB returned.
+        attrs_for_query = None
+        project_fields = []
+        fields_mode = "all"
+    else:
+        attrs_for_query = requested
+        project_fields = requested
+        fields_mode = "specific"
+
+    try:
+        rows = _fetch_entity_rows(
+            entity=canonical,
+            attrs=attrs_for_query,
+            where=where,
+            exclude=exclude,
+            limit=limit,
+        )
+    except Exception as exc:
+        logger.exception("[SDB /full/%s] query failed", canonical)
+        return {
+            "success": False,
+            "type": canonical,
+            "error": f"Query failed: {exc}",
+            "count": 0,
+            "fields_mode": fields_mode,
+            "fields": project_fields,
+            "data": [],
+        }
+
+    # Project to the requested fields (preserves order, fills missing as "")
+    # Only project in 'curated' and 'specific' modes; in 'all' mode return
+    # whatever LDB gave us verbatim.
+    if project_fields:
+        data = _project_fields(rows, project_fields)
+    else:
+        data = rows
+        # In 'all' mode, derive the actual field list from the first record
+        # so the web frontend knows what columns came back.
+        if data:
+            seen = []
+            seen_set = set()
+            for rec in data:
+                for k in rec.keys():
+                    if k not in seen_set:
+                        seen.append(k)
+                        seen_set.add(k)
+            project_fields = seen
+
+    return {
+        "success": True,
+        "type": canonical,
+        "count": len(data),
+        "fields_mode": fields_mode,
+        "fields": project_fields,
+        "data": data,
+    }
+
+
+@router.get(
+    "/info/{entity}",
+    summary="Лёгкая информация о сущности (count или выбранные поля)",
+    description=(
+        "Возвращает лёгкую сводку по сущности — только то, что нужно вебу.\n\n"
+        "Поддерживаемые типы: `users`, `groups`, `computers`, `ous`, "
+        "`gpos`, `contacts`, `dns`.\n\n"
+        "Параметр `fields`:\n"
+        "- `count` (по умолчанию) → ответ `{'success': true, 'type': 'users', 'count': 17}`\n"
+        "- `*` → ВСЕ атрибуты LDAP (без фильтрации)\n"
+        "- `name,mail` → только указанные поля для каждой записи\n\n"
+        "Эндпоинт оптимизирован для дашбордов: можно сначала получить "
+        "только `count`, а потом дозагрузить нужные поля."
+    ),
+)
+async def sdb_info_entity_endpoint(
+    request: Request,
+    entity: str,
+    api_key: ApiKeyDep,                                  # ← BEFORE default params (fixes SyntaxError)
+    fields: str = Query(
+        default="count",
+        description=(
+            "Что вернуть: `count` (только количество, по умолчанию), "
+            "`*` (ВСЕ атрибуты LDAP), или список конкретных атрибутов через запятую."
+        ),
+    ),
+    where: str = Query(
+        default="",
+        description="Необязательный фильтр вида `cn=*Admin*` (применяется только если fields != count).",
+    ),
+    exclude: str = Query(
+        default="",
+        description="Исключить sAMAccountName через запятую.",
+    ),
+    limit: int = Query(
+        default=0,
+        ge=0,
+        description="Максимум записей (0 = все). Применяется только если fields != count.",
+    ),
+) -> dict:
+    """Лёгкая информация о сущности: count или выбранные поля.
+
+    Логика работы параметра `fields`:
+      • `count` (или не указан)        → только счётчик записей
+      • `*`                            → ВСЕ атрибуты LDAP (без фильтрации)
+      • `sAMAccountName,cn,mail`       → только указанные поля
+    """
+    canonical = _normalize_entity(entity)
+    requested = _parse_fields_param(fields)
+
+    # Mode 1: count only — cheapest possible query
+    if not requested or requested == ["count"]:
+        try:
+            rows = _fetch_entity_rows(
+                entity=canonical,
+                attrs=None,            # let ldbsearch return minimal set
+                where="",              # ignore WHERE in count mode
+                exclude=exclude,
+                limit=0,
+            )
+        except Exception as exc:
+            logger.exception("[SDB /info/%s] count failed", canonical)
+            return {
+                "success": False,
+                "type": canonical,
+                "error": f"Count failed: {exc}",
+                "count": 0,
+            }
+        return {
+            "success": True,
+            "type": canonical,
+            "count": len(rows),
+        }
+
+    # Mode 2: '*' → ALL LDAP attributes, no projection
+    if requested == ["*"]:
+        attrs_for_query = None
+        project_fields = []
+        fields_mode = "all"
+    else:
+        # Mode 3: specific fields → fetch only those
+        attrs_for_query = requested
+        project_fields = requested
+        fields_mode = "specific"
+
+    try:
+        rows = _fetch_entity_rows(
+            entity=canonical,
+            attrs=attrs_for_query,
+            where=where,
+            exclude=exclude,
+            limit=limit,
+        )
+    except Exception as exc:
+        logger.exception("[SDB /info/%s] query failed", canonical)
+        return {
+            "success": False,
+            "type": canonical,
+            "error": f"Query failed: {exc}",
+            "count": 0,
+            "fields_mode": fields_mode,
+            "fields": project_fields,
+            "data": [],
+        }
+
+    # Project only in 'specific' mode; in 'all' mode return LDB data verbatim
+    if project_fields:
+        data = _project_fields(rows, project_fields)
+    else:
+        data = rows
+        # In 'all' mode, derive the actual field list from the records
+        if data:
+            seen = []
+            seen_set = set()
+            for rec in data:
+                for k in rec.keys():
+                    if k not in seen_set:
+                        seen.append(k)
+                        seen_set.add(k)
+            project_fields = seen
+
+    return {
+        "success": True,
+        "type": canonical,
+        "count": len(data),
+        "fields_mode": fields_mode,
+        "fields": project_fields,
+        "data": data,
+    }
+
+
 @router.post(
     "/query",
     summary="Execute SDB LDB query",

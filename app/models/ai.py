@@ -58,6 +58,45 @@ class AIRequest(BaseModel):
             "they will be rejected and the default model will be used."
         ),
     )
+    # v2.1.1: Caller-supplied system prompt. When provided, replaces the
+    # hardcoded ETL-Constructor system prompt entirely (per
+    # API_SERVER_SDB_FIX.md Variant 1). This is what enables the frontend
+    # SDB mode to send its own SDB_SYSTEM_PROMPT and have the backend
+    # actually use it instead of discarding it.
+    system: Optional[str] = Field(
+        None,
+        description=(
+            "Optional caller-supplied system prompt. When provided, "
+            "the backend uses this INSTEAD OF the hardcoded ETL "
+            "Constructor system prompt. Used by the frontend SDB mode "
+            "to inject SDB-specific instructions. (v2.1.1 — "
+            "API_SERVER_SDB_FIX.md Variant 1)"
+        ),
+    )
+    data: Optional[str] = Field(
+        None,
+        description=(
+            "Optional extra data context appended to the user message "
+            "as a [DATA CONTEXT] block. Used by the frontend to feed "
+            "structured data (e.g. current task state) to the LLM."
+        ),
+    )
+    # v2.1.1: Mode selector (API_SERVER_SDB_FIX.md Variant 3).
+    # 'constructor' = ETL Constructor (default, existing behavior)
+    # 'agent'       = Agent system prompt
+    # 'sdb'         = SDB query generator prompt
+    # If `system` is also supplied, it takes precedence over the
+    # mode-selected prompt.
+    mode: Optional[str] = Field(
+        None,
+        description=(
+            "Optional prompt-mode selector: 'constructor' (default), "
+            "'agent', or 'sdb'. Selects which built-in system prompt "
+            # pylint: disable=line-too-long
+            "to use. Ignored when `system` is provided explicitly. "
+            "(v2.1.1 — API_SERVER_SDB_FIX.md Variant 3)"
+        ),
+    )
 
     # v1.6.8-3 fix #2: Reject type-name strings like "string" in model_override
     @field_validator("model_override", mode="before")
@@ -74,6 +113,22 @@ class AIRequest(BaseModel):
                 # Return None so the server default model is used instead
                 return None
         return v
+
+    @field_validator("mode", mode="before")
+    @classmethod
+    def _validate_mode(cls, v: Any) -> Any:
+        """Normalize and validate the `mode` field."""
+        if v is None:
+            return None
+        if not isinstance(v, str):
+            return None
+        v_norm = v.strip().lower()
+        if v_norm in ("", "constructor", "etl", "task_builder"):
+            return "constructor" if v_norm not in ("",) else None
+        if v_norm in ("agent", "sdb"):
+            return v_norm
+        # Unknown mode — fall back to default (None) rather than rejecting
+        return None
 
 
 # ── Actions (returned by AI) ────────────────────────────────────────────
@@ -725,4 +780,96 @@ class AIDataSchemaResponse(BaseModel):
     formats: List[str] = Field(
         default_factory=lambda: ["json", "csv", "tsv", "xlsx", "ldif", "table"],
         description="Available output formats for data operations.",
+    )
+
+
+# ── SDB AI Mode (v2.1.1 — API_SERVER_SDB_FIX.md) ────────────────────────
+
+
+class AISdbRequest(BaseModel):
+    """Request body for ``POST /api/v1/ai/sdb``.
+
+    The frontend SDB mode uses this dedicated endpoint instead of
+    ``/ai/assistant`` so that:
+
+    1. The backend uses the SDB-specific system prompt (``SDB_SYSTEM_PROMPT``)
+       by default — the frontend no longer has to send it.
+    2. If the frontend *does* supply ``system``, it overrides the default
+       SDB prompt (Variant 1 from API_SERVER_SDB_FIX.md).
+    3. The response is the same ``AIResponse`` shape the existing
+       Task Builder endpoint returns (``actions: [...]``), so the
+       frontend constructor code path is reused unchanged.
+    """
+
+    prompt: str = Field(
+        ...,
+        min_length=1,
+        max_length=4000,
+        description=(
+            "Natural-language SDB request from the user. "
+            "Examples: 'show 5 users', 'admin users', "
+            "'disabled accounts', 'computers with Windows 10'."
+        ),
+    )
+    context: Optional[Dict[str, Any]] = Field(
+        None,
+        description=(
+            "Optional task-graph context from the frontend constructor. "
+            "Passed through to the LLM as [CURRENT TASK CONTEXT]."
+        ),
+    )
+    safe_mode: bool = Field(
+        True,
+        description=(
+            "When True (default), real data values in `context` are "
+            "masked before being sent to the LLM."
+        ),
+    )
+    model_override: Optional[str] = Field(
+        None,
+        description=(
+            "Override the default LLM model for this request. "
+            "If None, uses ``SAMBA_POLZA_AI_MODEL`` (or "
+            "``SAMBA_AI_DEFAULT_MODEL``)."
+        ),
+    )
+    system: Optional[str] = Field(
+        None,
+        description=(
+            "Optional caller-supplied system prompt. When provided, "
+            "REPLACES the built-in ``SDB_SYSTEM_PROMPT``. Use this to "
+            "tweak SDB behavior without forking the backend. "
+            "(API_SERVER_SDB_FIX.md Variant 1)"
+        ),
+    )
+    data: Optional[str] = Field(
+        None,
+        description=(
+            "Optional extra data context appended to the user message "
+            "as a [DATA CONTEXT] block."
+        ),
+    )
+
+    @field_validator("model_override", mode="before")
+    @classmethod
+    def _validate_model_override(cls, v: Any) -> Any:
+        """Reject obviously invalid model names (same rule as AIRequest)."""
+        if v is not None and isinstance(v, str):
+            invalid_names = {"string", "str", "int", "float", "bool", "none", "null", ""}
+            if v.lower().strip() in invalid_names:
+                return None
+        return v
+
+
+class AISdbResponse(AIResponse):
+    """Response for ``POST /api/v1/ai/sdb``.
+
+    Identical shape to :class:`AIResponse` — declared as a separate
+    subclass so the OpenAPI schema documents the SDB endpoint
+    independently and the frontend can keep its typed client.
+    """
+
+    mode: str = Field(
+        default="sdb",
+        description="Always 'sdb' for this endpoint — helps the frontend branch.",
     )

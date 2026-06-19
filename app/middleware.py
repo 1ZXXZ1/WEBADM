@@ -141,12 +141,18 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         write_limit: int = 60,
         shell_projet_limit: int = 120,
         window_seconds: int = 60,
+        per_user_limit: int = 0,
     ) -> None:
         super().__init__(app)
         self.auth_limit = auth_limit
         self.read_limit = read_limit
         self.write_limit = write_limit
         self.shell_projet_limit = shell_projet_limit
+        # v2.3: Optional per-user global limit (sum of read+write+shell).
+        # 0 = disabled. When > 0, every authenticated user gets this
+        # many requests per window across ALL endpoint groups (in
+        # addition to the per-group limits above).
+        self.per_user_limit = per_user_limit
         self._counter = _SlidingWindowCounter(window_seconds=window_seconds)
         self._window = window_seconds
 
@@ -238,6 +244,36 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
                 },
                 headers={"Retry-After": str(retry_after)},
             )
+
+        # v2.3: Per-user global limit (optional).
+        # When SAMBA_RATE_LIMIT_PER_USER_PER_MIN > 0, count every
+        # non-auth request against a per-user total as well. This
+        # prevents any single user from monopolising the server even
+        # if their role grants high per-group limits.
+        if self.per_user_limit > 0 and group != "auth":
+            # Prefer the authenticated user_id (set by combined_auth_middleware)
+            user_id = getattr(request.state, "user_id", None)
+            if user_id:
+                user_key = f"user_total:{user_id}"
+                user_total = self._counter.increment(user_key)
+                if user_total > self.per_user_limit:
+                    if self._counter._buckets.get(user_key):
+                        self._counter._buckets[user_key].pop()
+                    logger.warning(
+                        "Per-user rate limit exceeded: user_id=%s count=%d limit=%d",
+                        user_id, user_total, self.per_user_limit,
+                    )
+                    return JSONResponse(
+                        status_code=429,
+                        content={
+                            "status": "error",
+                            "message": (
+                                f"Per-user rate limit exceeded "
+                                f"(limit: {self.per_user_limit} requests per {self._window}s)."
+                            ),
+                        },
+                        headers={"Retry-After": str(self._window)},
+                    )
 
         return await call_next(request)
 

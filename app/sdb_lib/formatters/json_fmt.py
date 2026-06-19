@@ -6,7 +6,7 @@ import json
 import os
 from typing import List, Optional, Any
 
-from sdb.parser.ldif import LdifRecord
+from app.sdb_lib.parser.ldif import LdifRecord
 
 
 class JsonFormatter:

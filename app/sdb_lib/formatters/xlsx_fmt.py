@@ -21,7 +21,7 @@ os.environ.setdefault("OPENPYXL_USE_NUMPY", "0")
 # Also prevent numpy from being imported by any dependency
 os.environ.setdefault("NUMPY_EXPERIMENTAL_DTYPE_API", "0")
 
-from sdb.parser.ldif import LdifRecord
+from app.sdb_lib.parser.ldif import LdifRecord
 
 
 # ─── Предустановленные формулы ──────────────────────────────────────────

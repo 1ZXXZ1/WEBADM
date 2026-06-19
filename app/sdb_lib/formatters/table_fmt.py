@@ -13,10 +13,11 @@
 """
 
 import os
+import shutil
 from typing import List, Optional
 
-from sdb.parser.ldif import LdifRecord
-from sdb.config import TABLE_MAX_COL_WIDTH, TABLE_TRUNCATE
+from app.sdb_lib.parser.ldif import LdifRecord
+from app.sdb_lib.config import TABLE_MAX_COL_WIDTH, TABLE_TRUNCATE
 
 # Стили таблиц (выбираются через FORMAT table_presto, table_grid, и т.д.)
 TABLE_STYLES = {
@@ -30,16 +31,33 @@ TABLE_STYLES = {
     "table_outline": "outline",
 }
 
+# Минимальная ширина колонки (для заголовка)
+_MIN_COL_WIDTH = 4
+
+# Максимальное количество колонок для широкого вывода.
+# Если колонок больше — автоматически переключаемся на compact-режим
+_MAX_COLUMNS_WIDE = 10
+
+
+def _get_terminal_width() -> int:
+    """Определить ширину терминала. Возвращает 200 если не удалось."""
+    try:
+        cols = shutil.get_terminal_size((200, 25)).columns
+        return max(cols, 80)
+    except Exception:
+        return 200
+
 
 class TableFormatter:
     """
     Форматер для вывода записей в виде красивой таблицы через tabulate.
 
     Поддерживает:
-      - Автоматическую подгонку ширины колонок
+      - Автоматическую подгонку ширины колонок под терминал
       - Усечение длинных значений
       - Нумерацию строк
       - Различные стили таблиц (presto, grid, simple, rounded, и т.д.)
+      - Автоматическое переключение в compact-режим при большом числе колонок
     """
 
     def __init__(self, style: str = "presto"):
@@ -89,19 +107,49 @@ class TableFormatter:
         # Определяем колонки
         columns = self._determine_columns(flat_records, fields, include_dn)
 
+        # Определяем ширину терминала и рассчитываем max_width для колонок
+        term_width = _get_terminal_width()
+        n_cols = len(columns) + (1 if show_row_numbers else 0)
+
+        # Рассчитываем доступную ширину с учётом разделителей
+        # Для presto: | col1 | col2 | ... → 3 * n_cols символов на разделители
+        sep_overhead = 3 * n_cols + 2  # примерно
+        available_width = term_width - sep_overhead
+        col_max = max(available_width // max(n_cols, 1), _MIN_COL_WIDTH)
+
+        # Если колонок слишком много — переключаемся на compact-режим
+        compact_mode = len(columns) > _MAX_COLUMNS_WIDE
+
+        if compact_mode:
+            # В compact-режиме показываем только приоритетные колонки
+            columns = self._select_compact_columns(flat_records, columns, term_width)
+            n_cols = len(columns) + (1 if show_row_numbers else 0)
+            sep_overhead = 3 * n_cols + 2
+            available_width = term_width - sep_overhead
+            col_max = max(available_width // max(n_cols, 1), _MIN_COL_WIDTH)
+
+        # Ограничиваем max_width до рассчитанного col_max
+        effective_max = min(max_width, col_max)
+
         # Подготавливаем данные
         rows = []
         for flat_rec in flat_records:
             row = []
             for col in columns:
                 value = flat_rec.get(col, "")
-                if truncate and len(str(value)) > max_width:
-                    value = str(value)[:max_width - 3] + "..."
-                row.append(value)
+                value_str = str(value)
+                if truncate and len(value_str) > effective_max:
+                    value_str = value_str[:effective_max - 3] + "..."
+                row.append(value_str)
             rows.append(row)
 
-        # Заголовки
-        headers = [col.upper() for col in columns]
+        # Заголовки — усекаем если длиннее effective_max
+        headers = []
+        for col in columns:
+            h = col.upper()
+            if len(h) > effective_max:
+                h = h[:effective_max - 2] + ".."
+            headers.append(h)
 
         # Выбираем стиль таблицы
         tabulate_fmt = TABLE_STYLES.get(self.style, "presto")
@@ -130,9 +178,69 @@ class TableFormatter:
             )
 
         # Итоговая информация
-        table_str += f"\n\nВсего записей: {len(records)}"
+        total_info = f"\n\nВсего записей: {len(records)}"
+        if compact_mode:
+            total_info += f" (показано {len(columns)} из {_determine_all_columns(flat_records, fields, include_dn)} колонок)"
+        table_str += total_info
 
         return table_str
+
+    def _select_compact_columns(
+        self,
+        flat_records: List[dict],
+        all_columns: List[str],
+        term_width: int,
+    ) -> List[str]:
+        """Выбрать компактный набор колонок, чтобы таблица влезла в терминал."""
+        # Приоритетные колонки для compact-режима
+        compact_priority = [
+            "dn", "sAMAccountName", "cn", "name", "objectClass",
+            "displayName", "description", "ou", "mail",
+            "department", "objectSid", "whenCreated",
+            "userAccountControl", "memberOf", "sAMAccountType",
+        ]
+
+        selected = []
+        seen = set()
+        current_width = 0
+
+        # Сначала добавляем приоритетные, если они есть в данных
+        for attr in compact_priority:
+            if attr in all_columns and attr not in seen:
+                # Примерная ширина колонки: max(заголовок, самое длинное значение)
+                col_width = self._estimate_col_width(flat_records, attr)
+                if current_width + col_width + 3 < term_width:
+                    selected.append(attr)
+                    seen.add(attr)
+                    current_width += col_width + 3
+
+        # Потом добавляем оставшиеся, пока есть место
+        for col in all_columns:
+            if col not in seen:
+                col_width = self._estimate_col_width(flat_records, col)
+                if current_width + col_width + 3 < term_width:
+                    selected.append(col)
+                    seen.add(col)
+                    current_width += col_width + 3
+
+        # Если не выбрали ни одной — берём первые 6
+        if not selected:
+            selected = all_columns[:6]
+
+        return selected
+
+    def _estimate_col_width(
+        self,
+        flat_records: List[dict],
+        col: str,
+        max_sample: int = 20,
+    ) -> int:
+        """Оценить ширину колонки по заголовку и значениям."""
+        width = len(col)  # заголовок
+        for rec in flat_records[:max_sample]:
+            val = str(rec.get(col, ""))
+            width = max(width, min(len(val), TABLE_MAX_COL_WIDTH))
+        return min(width, TABLE_MAX_COL_WIDTH)
 
     def _determine_columns(
         self,
@@ -212,3 +320,18 @@ class TableFormatter:
             f.write("\n")
 
         return filepath
+
+
+def _determine_all_columns(
+    flat_records: List[dict],
+    fields: Optional[List[str]],
+    include_dn: bool,
+) -> int:
+    """Подсчитать общее количество колонок."""
+    seen = set()
+    if include_dn:
+        seen.add("dn")
+    for rec in flat_records:
+        for key in rec.keys():
+            seen.add(key)
+    return len(seen)

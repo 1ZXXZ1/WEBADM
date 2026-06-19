@@ -80,6 +80,8 @@ def init_db(
     try:
         with conn.cursor() as cur:
             cur.execute(_SCHEMA)
+            # v2.2 migrations: add weight / is_active columns to existing tables
+            _apply_migrations(cur)
         conn.commit()
         logger.info("[MGMT DB] Tables verified/created in PostgreSQL")
     except Exception as exc:
@@ -91,6 +93,53 @@ def init_db(
 
     # Seed default admin user and roles if tables are empty
     _seed_defaults()
+
+
+def _apply_migrations(cur) -> None:
+    """Apply incremental schema migrations (idempotent).
+
+    v2.2:
+      - Add ``weight INTEGER DEFAULT 0`` to mgmt_users, mgmt_api_keys, mgmt_roles.
+      - Add ``is_active BOOLEAN DEFAULT TRUE`` to mgmt_roles (so roles can be
+        enabled/disabled the same way users and keys can).
+      - Add ``last_login_at TEXT`` to mgmt_users (audit/UX convenience).
+      - Add ``login_count INTEGER DEFAULT 0`` to mgmt_users.
+
+    Each migration uses ``ADD COLUMN IF NOT EXISTS`` so it is safe to run
+    on both fresh and upgraded databases.
+    """
+    migrations = [
+        # weight columns — used for ordering / priority in UI and resolution
+        "ALTER TABLE mgmt_users    ADD COLUMN IF NOT EXISTS weight INTEGER DEFAULT 0",
+        "ALTER TABLE mgmt_api_keys ADD COLUMN IF NOT EXISTS weight INTEGER DEFAULT 0",
+        "ALTER TABLE mgmt_roles    ADD COLUMN IF NOT EXISTS weight INTEGER DEFAULT 0",
+        # is_active on roles — allows disabling a role without deleting it
+        "ALTER TABLE mgmt_roles    ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE",
+        # audit / UX convenience for users
+        "ALTER TABLE mgmt_users    ADD COLUMN IF NOT EXISTS last_login_at TEXT",
+        "ALTER TABLE mgmt_users    ADD COLUMN IF NOT EXISTS login_count INTEGER DEFAULT 0",
+        # convenient search index
+        "CREATE INDEX IF NOT EXISTS idx_mgmt_roles_active ON mgmt_roles(is_active)",
+        "CREATE INDEX IF NOT EXISTS idx_mgmt_users_active ON mgmt_users(is_active)",
+        "CREATE INDEX IF NOT EXISTS idx_mgmt_users_role   ON mgmt_users(role)",
+        # v2.3.2: Rich audit log — added columns for HTTP context + semantic events
+        "ALTER TABLE mgmt_audit_log ADD COLUMN IF NOT EXISTS username TEXT DEFAULT ''",
+        "ALTER TABLE mgmt_audit_log ADD COLUMN IF NOT EXISTS method TEXT DEFAULT ''",
+        "ALTER TABLE mgmt_audit_log ADD COLUMN IF NOT EXISTS status_code INTEGER",
+        "ALTER TABLE mgmt_audit_log ADD COLUMN IF NOT EXISTS duration_ms INTEGER",
+        "ALTER TABLE mgmt_audit_log ADD COLUMN IF NOT EXISTS user_agent TEXT DEFAULT ''",
+        "ALTER TABLE mgmt_audit_log ADD COLUMN IF NOT EXISTS request_body TEXT DEFAULT ''",
+        "ALTER TABLE mgmt_audit_log ADD COLUMN IF NOT EXISTS auth_method TEXT DEFAULT ''",
+        "ALTER TABLE mgmt_audit_log ADD COLUMN IF NOT EXISTS event_type TEXT DEFAULT ''",
+        "CREATE INDEX IF NOT EXISTS idx_mgmt_audit_event      ON mgmt_audit_log(event_type)",
+        "CREATE INDEX IF NOT EXISTS idx_mgmt_audit_user       ON mgmt_audit_log(user_id)",
+        "CREATE INDEX IF NOT EXISTS idx_mgmt_audit_auth_method ON mgmt_audit_log(auth_method)",
+    ]
+    for stmt in migrations:
+        try:
+            cur.execute(stmt)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("[MGMT DB] migration skipped: %s | stmt=%s", exc, stmt[:80])
 
 
 def _get_conn():
@@ -140,6 +189,9 @@ CREATE TABLE IF NOT EXISTS mgmt_users (
     email           TEXT DEFAULT '',
     role            TEXT NOT NULL DEFAULT 'operator',
     is_active       BOOLEAN DEFAULT TRUE,
+    weight          INTEGER DEFAULT 0,
+    last_login_at   TEXT,
+    login_count     INTEGER DEFAULT 0,
     created_at      TEXT,
     updated_at      TEXT
 );
@@ -153,6 +205,7 @@ CREATE TABLE IF NOT EXISTS mgmt_api_keys (
     description     TEXT DEFAULT '',
     role            TEXT NOT NULL DEFAULT 'operator',
     is_active       BOOLEAN DEFAULT TRUE,
+    weight          INTEGER DEFAULT 0,
     expires_at      TEXT,
     created_at      TEXT,
     last_used_at    TEXT
@@ -164,6 +217,8 @@ CREATE TABLE IF NOT EXISTS mgmt_roles (
     description     TEXT DEFAULT '',
     permissions     JSONB DEFAULT '[]',
     is_builtin      BOOLEAN DEFAULT FALSE,
+    is_active       BOOLEAN DEFAULT TRUE,
+    weight          INTEGER DEFAULT 0,
     created_at      TEXT,
     updated_at      TEXT
 );
@@ -275,8 +330,22 @@ def _seed_defaults() -> None:
 # ═══════════════════════════════════════════════════════════════════════
 
 def create_user(username: str, password: str, role: str = "operator",
-                full_name: str = "", email: str = "") -> Dict[str, Any]:
-    """Create a new API user. Returns user record without password_hash."""
+                full_name: str = "", email: str = "",
+                weight: int = 0) -> Dict[str, Any]:
+    """Create a new API user. Returns user record without password_hash.
+
+    Parameters
+    ----------
+    weight : int
+        Optional priority/weight for ordering in UI and conflict resolution
+        (higher = more important). Defaults to 0.
+
+    Raises
+    ------
+    ValueError
+        * If username already exists
+        * If role does not exist (with hint to list roles)
+    """
     import bcrypt
 
     hashed = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
@@ -293,12 +362,15 @@ def create_user(username: str, password: str, role: str = "operator",
             # Validate role
             cur.execute("SELECT name FROM mgmt_roles WHERE name = %s", (role,))
             if not cur.fetchone():
-                raise ValueError(f"Invalid role '{role}'")
+                raise ValueError(
+                    f"Role '{role}' does not exist. "
+                    f"List roles: GET /api/v1/mgmt/roles"
+                )
 
             cur.execute(
-                "INSERT INTO mgmt_users (username, password_hash, full_name, email, role, is_active, created_at, updated_at) "
-                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
-                (username, hashed, full_name, email, role, True, now, now),
+                "INSERT INTO mgmt_users (username, password_hash, full_name, email, role, is_active, weight, created_at, updated_at) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
+                (username, hashed, full_name, email, role, True, int(weight), now, now),
             )
             user_id = cur.fetchone()[0]
         conn.commit()
@@ -332,9 +404,103 @@ def delete_user(user_id: int) -> bool:
         _return_conn(conn)
 
 
+def purge_user(user_id: int) -> bool:
+    """Hard-delete user record AND all its API keys (CASCADE).
+
+    Use with caution — this is irreversible. Use :func:`delete_user` for
+    the safer soft-delete.
+    """
+    conn = _get_conn()
+    try:
+        with conn.cursor() as cur:
+            # Block purging the last active admin to avoid lockout
+            cur.execute(
+                "SELECT COUNT(*) FROM mgmt_users WHERE role = 'admin' AND is_active = TRUE"
+            )
+            active_admins = cur.fetchone()[0]
+            cur.execute("SELECT role, is_active FROM mgmt_users WHERE id = %s", (user_id,))
+            row = cur.fetchone()
+            if not row:
+                return False
+            if row[0] == "admin" and row[1] and active_admins <= 1:
+                raise ValueError("Refusing to purge the last active admin user")
+
+            cur.execute("DELETE FROM mgmt_users WHERE id = %s", (user_id,))
+            deleted = cur.rowcount > 0
+        conn.commit()
+        return deleted
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        _return_conn(conn)
+
+
+def enable_user(user_id: int) -> bool:
+    """Re-activate a previously disabled user (does NOT re-enable API keys)."""
+    now = _now_iso()
+    conn = _get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE mgmt_users SET is_active = TRUE, updated_at = %s WHERE id = %s AND is_active = FALSE",
+                (now, user_id),
+            )
+            found = cur.rowcount > 0
+        conn.commit()
+        return found
+    except Exception:
+        conn.rollback()
+        return False
+    finally:
+        _return_conn(conn)
+
+
+def disable_user(user_id: int) -> bool:
+    """Disable a user (soft). Also disables all their API keys."""
+    return delete_user(user_id)
+
+
+def reset_user_password(user_id: int, new_password: Optional[str] = None) -> Optional[str]:
+    """Reset a user's password.
+
+    If ``new_password`` is ``None``, a strong random password is generated
+    and returned. Otherwise, the provided password is set and ``None`` is
+    returned on success.
+    """
+    import bcrypt
+
+    if not new_password:
+        # 24 chars, alnum + safe punctuation
+        new_password = secrets.token_urlsafe(18)
+
+    hashed = bcrypt.hashpw(new_password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+    now = _now_iso()
+    conn = _get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE mgmt_users SET password_hash = %s, updated_at = %s WHERE id = %s",
+                (hashed, now, user_id),
+            )
+            if cur.rowcount == 0:
+                return None
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        _return_conn(conn)
+    return new_password
+
+
 def update_user(user_id: int, **kwargs: Any) -> Optional[Dict[str, Any]]:
-    """Update user fields. Returns updated user or None."""
-    allowed = {"username", "full_name", "email", "role", "is_active"}
+    """Update user fields. Returns updated user or None.
+
+    Accepted kwargs: username, full_name, email, role, is_active, weight,
+    password (stored as password_hash).
+    """
+    allowed = {"username", "full_name", "email", "role", "is_active", "weight"}
     updates = {k: v for k, v in kwargs.items() if k in allowed}
 
     if "password" in kwargs:
@@ -375,7 +541,7 @@ def get_user(user_id: int) -> Optional[Dict[str, Any]]:
     try:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT id, username, password_hash, full_name, email, role, is_active, created_at, updated_at "
+                "SELECT id, username, password_hash, full_name, email, role, is_active, weight, last_login_at, login_count, created_at, updated_at "
                 "FROM mgmt_users WHERE id = %s", (user_id,)
             )
             row = cur.fetchone()
@@ -384,7 +550,9 @@ def get_user(user_id: int) -> Optional[Dict[str, Any]]:
             return {
                 "id": row[0], "username": row[1], "password_hash": row[2],
                 "full_name": row[3], "email": row[4], "role": row[5],
-                "is_active": 1 if row[6] else 0, "created_at": row[7], "updated_at": row[8],
+                "is_active": 1 if row[6] else 0, "weight": row[7] or 0,
+                "last_login_at": row[8], "login_count": row[9] or 0,
+                "created_at": row[10], "updated_at": row[11],
             }
     finally:
         _return_conn(conn)
@@ -396,7 +564,7 @@ def get_user_by_username(username: str) -> Optional[Dict[str, Any]]:
     try:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT id, username, password_hash, full_name, email, role, is_active, created_at, updated_at "
+                "SELECT id, username, password_hash, full_name, email, role, is_active, weight, last_login_at, login_count, created_at, updated_at "
                 "FROM mgmt_users WHERE username = %s", (username,)
             )
             row = cur.fetchone()
@@ -405,15 +573,22 @@ def get_user_by_username(username: str) -> Optional[Dict[str, Any]]:
             return {
                 "id": row[0], "username": row[1], "password_hash": row[2],
                 "full_name": row[3], "email": row[4], "role": row[5],
-                "is_active": 1 if row[6] else 0, "created_at": row[7], "updated_at": row[8],
+                "is_active": 1 if row[6] else 0, "weight": row[7] or 0,
+                "last_login_at": row[8], "login_count": row[9] or 0,
+                "created_at": row[10], "updated_at": row[11],
             }
     finally:
         _return_conn(conn)
 
 
 def list_users(role: Optional[str] = None, is_active: Optional[bool] = None,
-               offset: int = 0, limit: int = 100) -> List[Dict[str, Any]]:
-    """List users with optional filtering and pagination."""
+               offset: int = 0, limit: int = 100,
+               search: Optional[str] = None) -> List[Dict[str, Any]]:
+    """List users with optional filtering and pagination.
+
+    v2.2: now supports ``search`` (case-insensitive LIKE on
+    username/full_name/email) and returns ``weight``.
+    """
     conditions = []
     params: list = []
 
@@ -423,6 +598,10 @@ def list_users(role: Optional[str] = None, is_active: Optional[bool] = None,
     if is_active is not None:
         conditions.append("is_active = %s")
         params.append(is_active)
+    if search:
+        conditions.append("(username ILIKE %s OR full_name ILIKE %s OR email ILIKE %s)")
+        like = f"%{search}%"
+        params.extend([like, like, like])
 
     where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
     params.extend([offset, limit])
@@ -431,8 +610,8 @@ def list_users(role: Optional[str] = None, is_active: Optional[bool] = None,
     try:
         with conn.cursor() as cur:
             cur.execute(
-                f"SELECT id, username, full_name, email, role, is_active, created_at, updated_at "
-                f"FROM mgmt_users {where} ORDER BY id OFFSET %s LIMIT %s",
+                f"SELECT id, username, full_name, email, role, is_active, weight, last_login_at, login_count, created_at, updated_at "
+                f"FROM mgmt_users {where} ORDER BY weight DESC, id OFFSET %s LIMIT %s",
                 params,
             )
             rows = cur.fetchall()
@@ -441,7 +620,9 @@ def list_users(role: Optional[str] = None, is_active: Optional[bool] = None,
                 d = {
                     "id": row[0], "username": row[1], "full_name": row[2],
                     "email": row[3], "role": row[4], "is_active": 1 if row[5] else 0,
-                    "created_at": row[6], "updated_at": row[7],
+                    "weight": row[6] or 0, "last_login_at": row[7],
+                    "login_count": row[8] or 0,
+                    "created_at": row[9], "updated_at": row[10],
                 }
                 results.append(d)
             return results
@@ -449,22 +630,94 @@ def list_users(role: Optional[str] = None, is_active: Optional[bool] = None,
         _return_conn(conn)
 
 
+def list_user_keys(user_id: int, include_inactive: bool = False) -> List[Dict[str, Any]]:
+    """Return all API keys belonging to a given user (optionally including inactive)."""
+    cond = ["user_id = %s"]
+    params: list = [user_id]
+    if not include_inactive:
+        cond.append("is_active = TRUE")
+    where = "WHERE " + " AND ".join(cond)
+    conn = _get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"SELECT id, key_prefix, user_id, name, description, role, is_active, weight, expires_at, created_at, last_used_at "
+                f"FROM mgmt_api_keys {where} ORDER BY weight DESC, id",
+                params,
+            )
+            rows = cur.fetchall()
+            return [
+                {
+                    "id": r[0], "key_prefix": _mask_key_prefix(r[1]), "user_id": r[2], "name": r[3],
+                    "description": r[4], "role": r[5], "is_active": 1 if r[6] else 0,
+                    "weight": r[7] or 0, "expires_at": r[8], "created_at": r[9],
+                    "last_used_at": r[10],
+                }
+                for r in rows
+            ]
+    finally:
+        _return_conn(conn)
+
+
 def authenticate_user(username: str, password: str) -> Optional[Dict[str, Any]]:
-    """Verify a username/password pair."""
+    """Verify a username/password pair.
+
+    v2.4.1: Returns a dict with ``_auth_status`` key to distinguish:
+      - ``None`` → user not found OR password wrong (generic, don't leak)
+      - ``{"_auth_status": "disabled", ...}`` → password correct but account disabled
+      - ``{...user record...}`` → success (no _auth_status key)
+
+    The login endpoint checks ``_auth_status`` to give a clear error message
+    like "Account is disabled" instead of the generic "Invalid username or
+    password". Password is verified FIRST, so you can't enumerate disabled
+    accounts without knowing the correct password.
+    """
     import bcrypt
 
     user = get_user_by_username(username)
-    if user is None or not user.get("is_active"):
-        return None
+    if user is None:
+        return None  # Don't leak whether username exists
 
+    # Check password BEFORE checking is_active — prevents account enumeration
     try:
-        if bcrypt.checkpw(password.encode("utf-8"), user["password_hash"].encode("utf-8")):
-            result = dict(user)
-            result.pop("password_hash", None)
-            return result
+        password_ok = bcrypt.checkpw(
+            password.encode("utf-8"),
+            user["password_hash"].encode("utf-8"),
+        )
     except Exception:
         logger.warning("bcrypt check failed for user '%s'", username, exc_info=True)
-    return None
+        return None
+
+    if not password_ok:
+        return None  # Wrong password — generic error
+
+    # Password is correct — now check if account is disabled
+    if not user.get("is_active"):
+        # Return a special marker so the login endpoint can give a clear message
+        return {
+            "_auth_status": "disabled",
+            "id": user["id"],
+            "username": user.get("username", username),
+        }
+
+    # Success — bump login stats
+    try:
+        conn = _get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE mgmt_users SET last_login_at = %s, login_count = COALESCE(login_count, 0) + 1 WHERE id = %s",
+                    (_now_iso(), user["id"]),
+                )
+            conn.commit()
+        finally:
+            _return_conn(conn)
+    except Exception:
+        logger.debug("login stats update failed (non-fatal)", exc_info=True)
+
+    result = dict(user)
+    result.pop("password_hash", None)
+    return result
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -475,16 +728,117 @@ def _hash_key(key: str) -> str:
     return hashlib.sha256(key.encode("utf-8")).hexdigest()
 
 
-def create_api_key(user_id: int, name: str = "", role: str = "operator",
-                   expires_days: Optional[int] = None, description: str = "") -> str:
-    """Generate a new API key. Returns plaintext key ONCE."""
-    user = get_user(user_id)
-    if not user or not user.get("is_active"):
-        raise ValueError(f"User {user_id} does not exist or is not active")
+def _mask_key_prefix(prefix: str) -> str:
+    """Mask the key prefix for display.
 
-    plaintext_key = secrets.token_urlsafe(48)
-    key_hash = _hash_key(plaintext_key)
-    key_prefix = plaintext_key[:8]
+    For WEBADC-XXXXX-XXXXX-XXXXX format keys (where prefix = full key):
+      WEBADC-RGJ4Y-5JXVF-9E2WN  →  WEBADC-RGJ4Y-…
+
+    For legacy keys (first 8 chars of token_urlsafe):
+      WMeUw-NV  →  WMeUw-NV  (already short, no masking needed)
+    """
+    if not prefix:
+        return ""
+    if prefix.upper().startswith("WEBADC-") and len(prefix) > 12:
+        # Show only the first group after WEBADC-
+        parts = prefix.split("-")
+        if len(parts) >= 2:
+            return f"{parts[0]}-{parts[1]}-…"
+        return prefix[:12] + "…"
+    return prefix
+
+
+# v2.3.5: Pretty API key format — WEBADC-XXXXX-XXXXX-XXXXX
+# Where X is from [A-Z0-9] (uppercase letters + digits, no ambiguous chars).
+# 3 groups of 5 chars = 15 random chars = ~78 bits of entropy.
+# Old keys (raw token_urlsafe) still validate via _normalize_key().
+
+_KEY_PREFIX = "WEBADC-"
+_KEY_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"  # no I, O, 0, 1 (ambiguous)
+_KEY_PART_LEN = 5
+_KEY_PARTS = 3
+
+
+def _generate_pretty_key() -> str:
+    """Generate a new API key in WEBADC-XXXXX-XXXXX-XXXXX format."""
+    parts = [
+        "".join(secrets.choice(_KEY_ALPHABET) for _ in range(_KEY_PART_LEN))
+        for _ in range(_KEY_PARTS)
+    ]
+    return f"{_KEY_PREFIX}{'-'.join(parts)}"
+
+
+def _normalize_key(key: str) -> tuple:
+    """Normalise an API key for hashing + prefix lookup.
+
+    Returns (normalised_key, prefix_for_lookup).
+
+    For new-format keys (``WEBADC-XXXXX-XXXXX-XXXXX``):
+      * normalised = uppercase, strip whitespace
+      * prefix = the full key (it's short enough to be unique)
+
+    For legacy keys (raw ``token_urlsafe``):
+      * normalised = as-is
+      * prefix = first 8 chars (old behaviour)
+
+    This lets old and new keys coexist in the same DB.
+    """
+    key = key.strip()
+    if key.upper().startswith(_KEY_PREFIX):
+        norm = key.upper()
+        return norm, norm  # prefix = full key (unique)
+    # Legacy key — use first 8 chars as prefix
+    return key, key[:8]
+
+
+def create_api_key(user_id: int, name: str = "", role: str = "operator",
+                   expires_days: Optional[int] = None, description: str = "",
+                   weight: int = 0) -> str:
+    """Generate a new API key. Returns plaintext key ONCE.
+
+    v2.3.5: Keys are now generated in the pretty format
+    ``WEBADC-XXXXX-XXXXX-XXXXX`` (e.g. ``WEBADC-K7M3P-Q9X2L-R5N8T``).
+
+    Parameters
+    ----------
+    weight : int
+        Priority for ordering when multiple keys exist for the same user
+        (higher = preferred). Defaults to 0.
+    expires_days : Optional[int]
+        Days until expiry. Must be >= 1 if set. None = no expiry.
+        Passing 0 is rejected (would create an immediately-expired key).
+
+    Raises
+    ------
+    ValueError
+        * If the user does not exist (clear message: "User N does not exist")
+        * If the user is disabled (clear message with recovery hint)
+        * If the role does not exist
+        * If expires_days < 1 (must be >= 1 or None)
+    """
+    # Validate expires_days early — prevent creating immediately-expired keys
+    if expires_days is not None and expires_days < 1:
+        raise ValueError(
+            f"expires_days must be >= 1 (got {expires_days}). "
+            f"Pass None for no expiry."
+        )
+
+    user = get_user(user_id)
+    if not user:
+        raise ValueError(
+            f"User {user_id} does not exist. "
+            f"List users: GET /api/v1/mgmt/users"
+        )
+    if not user.get("is_active"):
+        raise ValueError(
+            f"User {user_id} ({user.get('username', '')}) is disabled. "
+            f"Enable the user first: POST /api/v1/mgmt/users/{user_id}/enable"
+        )
+
+    # v2.3.5: Generate key in WEBADC-XXXXX-XXXXX-XXXXX format
+    plaintext_key = _generate_pretty_key()
+    norm_key, key_prefix = _normalize_key(plaintext_key)
+    key_hash = _hash_key(norm_key)
     now = _now_iso()
     expires_at = None
     if expires_days is not None:
@@ -496,12 +850,15 @@ def create_api_key(user_id: int, name: str = "", role: str = "operator",
             # Validate role
             cur.execute("SELECT name FROM mgmt_roles WHERE name = %s", (role,))
             if not cur.fetchone():
-                raise ValueError(f"Invalid role '{role}'")
+                raise ValueError(
+                    f"Role '{role}' does not exist. "
+                    f"List roles: GET /api/v1/mgmt/roles"
+                )
 
             cur.execute(
-                "INSERT INTO mgmt_api_keys (key_hash, key_prefix, user_id, name, description, role, is_active, expires_at, created_at) "
-                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
-                (key_hash, key_prefix, user_id, name, description, role, True, expires_at, now),
+                "INSERT INTO mgmt_api_keys (key_hash, key_prefix, user_id, name, description, role, is_active, weight, expires_at, created_at) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                (key_hash, key_prefix, user_id, name, description, role, True, int(weight), expires_at, now),
             )
         conn.commit()
     except Exception:
@@ -514,7 +871,7 @@ def create_api_key(user_id: int, name: str = "", role: str = "operator",
 
 
 def delete_api_key(key_id: int) -> bool:
-    """Deactivate an API key."""
+    """Deactivate an API key (soft-delete)."""
     conn = _get_conn()
     try:
         with conn.cursor() as cur:
@@ -529,9 +886,55 @@ def delete_api_key(key_id: int) -> bool:
         _return_conn(conn)
 
 
+def purge_api_key(key_id: int) -> bool:
+    """Hard-delete an API key record (irreversible)."""
+    conn = _get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM mgmt_api_keys WHERE id = %s", (key_id,))
+            deleted = cur.rowcount > 0
+        conn.commit()
+        return deleted
+    except Exception:
+        conn.rollback()
+        return False
+    finally:
+        _return_conn(conn)
+
+
+def enable_api_key(key_id: int) -> bool:
+    """Re-activate a previously disabled API key."""
+    conn = _get_conn()
+    try:
+        with conn.cursor() as cur:
+            # Make sure the owning user is still active
+            cur.execute(
+                "UPDATE mgmt_api_keys k SET is_active = TRUE "
+                "FROM mgmt_users u "
+                "WHERE k.id = %s AND k.user_id = u.id AND u.is_active = TRUE AND k.is_active = FALSE",
+                (key_id,),
+            )
+            found = cur.rowcount > 0
+        conn.commit()
+        return found
+    except Exception:
+        conn.rollback()
+        return False
+    finally:
+        _return_conn(conn)
+
+
+def disable_api_key(key_id: int) -> bool:
+    """Disable an API key (alias for :func:`delete_api_key`)."""
+    return delete_api_key(key_id)
+
+
 def update_api_key(key_id: int, **kwargs: Any) -> Optional[Dict[str, Any]]:
-    """Update API key fields."""
-    allowed = {"name", "description", "role", "is_active", "expires_at"}
+    """Update API key fields.
+
+    Accepted kwargs: name, description, role, is_active, expires_at, weight.
+    """
+    allowed = {"name", "description", "role", "is_active", "expires_at", "weight"}
     updates = {k: v for k, v in kwargs.items() if k in allowed}
 
     if not updates:
@@ -562,33 +965,44 @@ def get_api_key(key_id: int) -> Optional[Dict[str, Any]]:
     try:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT id, key_hash, key_prefix, user_id, name, description, role, is_active, expires_at, created_at, last_used_at "
+                "SELECT id, key_hash, key_prefix, user_id, name, description, role, is_active, weight, expires_at, created_at, last_used_at "
                 "FROM mgmt_api_keys WHERE id = %s", (key_id,)
             )
             row = cur.fetchone()
             if not row:
                 return None
             return {
-                "id": row[0], "key_hash": row[1], "key_prefix": row[2],
+                "id": row[0], "key_hash": row[1], "key_prefix": _mask_key_prefix(row[2]),
                 "user_id": row[3], "name": row[4], "description": row[5],
                 "role": row[6], "is_active": 1 if row[7] else 0,
-                "expires_at": row[8], "created_at": row[9], "last_used_at": row[10],
+                "weight": row[8] or 0, "expires_at": row[9],
+                "created_at": row[10], "last_used_at": row[11],
             }
     finally:
         _return_conn(conn)
 
 
 def validate_api_key(key_plaintext: str) -> Optional[Dict[str, Any]]:
-    """Validate a plaintext API key. Returns enriched info or None."""
-    key_hash = _hash_key(key_plaintext)
-    key_prefix = key_plaintext[:8]
+    """Validate a plaintext API key. Returns enriched info or None.
 
+    v2.4.3: Fixed connection-pool corruption — the ``last_used_at`` UPDATE
+    is now done in a SEPARATE connection so it can't interfere with the
+    validation reads. Previously, ``conn.commit()`` inside the read cursor
+    could leave the pooled connection in a bad state for the next caller,
+    causing the same key to validate once then fail on subsequent calls.
+
+    v2.4.2: Returns special markers for disabled accounts/roles/expiry.
+    """
+    norm_key, key_prefix = _normalize_key(key_plaintext)
+    key_hash = _hash_key(norm_key)
+
+    # ── Phase 1: READ-ONLY validation (no commits) ──────────────────
     conn = _get_conn()
     try:
         with conn.cursor() as cur:
             cur.execute(
                 "SELECT id, key_hash, user_id, role, key_prefix, expires_at, is_active "
-                "FROM mgmt_api_keys WHERE key_prefix = %s AND is_active = TRUE",
+                "FROM mgmt_api_keys WHERE key_prefix = %s",
                 (key_prefix,),
             )
             row = cur.fetchone()
@@ -600,6 +1014,32 @@ def validate_api_key(key_plaintext: str) -> Optional[Dict[str, Any]]:
             if not secrets.compare_digest(db_hash, key_hash):
                 return None
 
+            # Key itself is inactive — check WHY before returning None.
+            # If the owning user is also disabled, return user_disabled so
+            # the middleware can give the clear "Account is disabled" message.
+            # Otherwise return key_disabled for a clear "key deactivated" msg.
+            if not db_active:
+                # Look up the user to see if THEY are disabled
+                cur.execute("SELECT username, is_active FROM mgmt_users WHERE id = %s", (db_user_id,))
+                user_row = cur.fetchone()
+                if user_row:
+                    _uname = user_row[0]
+                    _user_active = bool(user_row[1])
+                    if not _user_active:
+                        return {
+                            "_auth_status": "user_disabled",
+                            "key_id": db_id,
+                            "user_id": db_user_id,
+                            "username": _uname,
+                        }
+                # User is active but key is deactivated
+                return {
+                    "_auth_status": "key_disabled",
+                    "key_id": db_id,
+                    "user_id": db_user_id,
+                    "username": user_row[0] if user_row else "",
+                }
+
             # Check expiry
             if db_expires:
                 try:
@@ -607,38 +1047,104 @@ def validate_api_key(key_plaintext: str) -> Optional[Dict[str, Any]]:
                     if exp.tzinfo is None:
                         exp = exp.replace(tzinfo=timezone.utc)
                     if datetime.now(timezone.utc) > exp:
-                        return None
+                        return {
+                            "_auth_status": "key_expired",
+                            "key_id": db_id,
+                            "user_id": db_user_id,
+                            "expires_at": db_expires,
+                        }
                 except (ValueError, TypeError):
                     pass
 
-            # Update last_used_at
-            now = _now_iso()
-            try:
-                cur.execute("UPDATE mgmt_api_keys SET last_used_at = %s WHERE id = %s", (now, db_id))
-                conn.commit()
-            except Exception:
-                conn.rollback()
-
-            # Get username
-            cur.execute("SELECT username FROM mgmt_users WHERE id = %s", (db_user_id,))
+            # Check user is active
+            cur.execute("SELECT username, is_active FROM mgmt_users WHERE id = %s", (db_user_id,))
             user_row = cur.fetchone()
-            username = user_row[0] if user_row else None
+            if not user_row:
+                return None
+            username = user_row[0]
+            user_is_active = bool(user_row[1])
 
-        return {
+            if not user_is_active:
+                return {
+                    "_auth_status": "user_disabled",
+                    "key_id": db_id,
+                    "user_id": db_user_id,
+                    "username": username,
+                }
+
+            # Check role is active + get permissions
+            role_perms: list = []
+            try:
+                cur.execute(
+                    "SELECT permissions, is_active FROM mgmt_roles WHERE name = %s",
+                    (db_role,),
+                )
+                rr = cur.fetchone()
+                if rr:
+                    if not rr[1]:
+                        return {
+                            "_auth_status": "role_disabled",
+                            "key_id": db_id,
+                            "user_id": db_user_id,
+                            "username": username,
+                            "role": db_role,
+                        }
+                    perms = rr[0]
+                    if isinstance(perms, str):
+                        try:
+                            perms = json.loads(perms)
+                        except json.JSONDecodeError:
+                            perms = []
+                    role_perms = list(perms or [])
+            except Exception:
+                pass
+
+        # Rollback any read-only transaction state before returning the conn
+        conn.rollback()
+
+        result = {
             "key_id": db_id,
             "user_id": db_user_id,
             "username": username,
             "role": db_role,
-            "key_prefix": db_prefix,
+            "key_prefix": _mask_key_prefix(db_prefix),
             "expires_at": db_expires,
+            "permissions": role_perms,
         }
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         _return_conn(conn)
 
+    # ── Phase 2: Update last_used_at in a SEPARATE connection ───────
+    # This isolation prevents the write from corrupting the read-only
+    # validation state for the next caller that gets the same pooled conn.
+    try:
+        conn2 = _get_conn()
+        try:
+            with conn2.cursor() as cur2:
+                cur2.execute(
+                    "UPDATE mgmt_api_keys SET last_used_at = %s WHERE id = %s",
+                    (_now_iso(), db_id),
+                )
+            conn2.commit()
+        finally:
+            _return_conn(conn2)
+    except Exception:
+        logger.debug("last_used_at update failed (non-fatal)", exc_info=True)
+
+    return result
+
 
 def list_api_keys(user_id: Optional[int] = None, is_active: Optional[bool] = None,
-                  offset: int = 0, limit: int = 100) -> List[Dict[str, Any]]:
-    """List API keys with optional filtering."""
+                  offset: int = 0, limit: int = 100,
+                  search: Optional[str] = None) -> List[Dict[str, Any]]:
+    """List API keys with optional filtering.
+
+    v2.2: now supports ``search`` (case-insensitive LIKE on name/description)
+    and returns ``weight``.
+    """
     conditions = []
     params: list = []
 
@@ -648,6 +1154,10 @@ def list_api_keys(user_id: Optional[int] = None, is_active: Optional[bool] = Non
     if is_active is not None:
         conditions.append("is_active = %s")
         params.append(is_active)
+    if search:
+        conditions.append("(name ILIKE %s OR description ILIKE %s)")
+        like = f"%{search}%"
+        params.extend([like, like])
 
     where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
     params.extend([offset, limit])
@@ -656,16 +1166,17 @@ def list_api_keys(user_id: Optional[int] = None, is_active: Optional[bool] = Non
     try:
         with conn.cursor() as cur:
             cur.execute(
-                f"SELECT id, key_prefix, user_id, name, description, role, is_active, expires_at, created_at, last_used_at "
-                f"FROM mgmt_api_keys {where} ORDER BY id OFFSET %s LIMIT %s",
+                f"SELECT id, key_prefix, user_id, name, description, role, is_active, weight, expires_at, created_at, last_used_at "
+                f"FROM mgmt_api_keys {where} ORDER BY weight DESC, id OFFSET %s LIMIT %s",
                 params,
             )
             rows = cur.fetchall()
             return [
                 {
-                    "id": r[0], "key_prefix": r[1], "user_id": r[2], "name": r[3],
+                    "id": r[0], "key_prefix": _mask_key_prefix(r[1]), "user_id": r[2], "name": r[3],
                     "description": r[4], "role": r[5], "is_active": 1 if r[6] else 0,
-                    "expires_at": r[7], "created_at": r[8], "last_used_at": r[9],
+                    "weight": r[7] or 0, "expires_at": r[8], "created_at": r[9],
+                    "last_used_at": r[10],
                 }
                 for r in rows
             ]
@@ -696,6 +1207,7 @@ def rotate_api_key(key_id: int) -> Optional[str]:
     return create_api_key(
         user_id=old_key["user_id"], name=old_key["name"], role=old_key["role"],
         expires_days=expires_days, description=old_key.get("description", ""),
+        weight=old_key.get("weight", 0) or 0,
     )
 
 
@@ -703,12 +1215,20 @@ def rotate_api_key(key_id: int) -> Optional[str]:
 #  Role Management
 # ═══════════════════════════════════════════════════════════════════════
 
-def list_roles() -> List[Dict[str, Any]]:
-    """List all defined roles with their permissions."""
+def list_roles(include_disabled: bool = True) -> List[Dict[str, Any]]:
+    """List all defined roles with their permissions.
+
+    v2.2: also returns ``weight`` and ``is_active``. When
+    ``include_disabled`` is False, disabled roles are excluded.
+    """
+    cond = "" if include_disabled else "WHERE is_active = TRUE"
     conn = _get_conn()
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT name, description, permissions, is_builtin, created_at, updated_at FROM mgmt_roles ORDER BY name")
+            cur.execute(
+                f"SELECT name, description, permissions, is_builtin, is_active, weight, created_at, updated_at "
+                f"FROM mgmt_roles {cond} ORDER BY weight DESC, name"
+            )
             rows = cur.fetchall()
             results = []
             for r in rows:
@@ -720,7 +1240,8 @@ def list_roles() -> List[Dict[str, Any]]:
                         perms = []
                 results.append({
                     "name": r[0], "description": r[1], "permissions": perms or [],
-                    "is_builtin": r[3], "created_at": r[4], "updated_at": r[5],
+                    "is_builtin": r[3], "is_active": 1 if r[4] else 0,
+                    "weight": r[5] or 0, "created_at": r[6], "updated_at": r[7],
                 })
             return results
     finally:
@@ -732,7 +1253,10 @@ def get_role(name: str) -> Optional[Dict[str, Any]]:
     conn = _get_conn()
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT name, description, permissions, is_builtin, created_at, updated_at FROM mgmt_roles WHERE name = %s", (name,))
+            cur.execute(
+                "SELECT name, description, permissions, is_builtin, is_active, weight, created_at, updated_at "
+                "FROM mgmt_roles WHERE name = %s", (name,)
+            )
             row = cur.fetchone()
             if not row:
                 return None
@@ -744,14 +1268,19 @@ def get_role(name: str) -> Optional[Dict[str, Any]]:
                     perms = []
             return {
                 "name": row[0], "description": row[1], "permissions": perms or [],
-                "is_builtin": row[3], "created_at": row[4], "updated_at": row[5],
+                "is_builtin": row[3], "is_active": 1 if row[4] else 0,
+                "weight": row[5] or 0, "created_at": row[6], "updated_at": row[7],
             }
     finally:
         _return_conn(conn)
 
 
-def create_role(name: str, permissions: List[str], description: str = "") -> Dict[str, Any]:
-    """Create a new custom role."""
+def create_role(name: str, permissions: List[str], description: str = "",
+                weight: int = 0) -> Dict[str, Any]:
+    """Create a new custom role.
+
+    v2.2: now accepts ``weight`` (priority for UI ordering).
+    """
     try:
         from app.permissions import ALL_PERMISSIONS
         invalid = set(permissions) - ALL_PERMISSIONS
@@ -769,9 +1298,9 @@ def create_role(name: str, permissions: List[str], description: str = "") -> Dic
                 raise ValueError(f"Role '{name}' already exists")
 
             cur.execute(
-                "INSERT INTO mgmt_roles (name, description, permissions, is_builtin, created_at, updated_at) "
-                "VALUES (%s, %s, %s, %s, %s, %s)",
-                (name, description, json.dumps(sorted(set(permissions))), False, now, now),
+                "INSERT INTO mgmt_roles (name, description, permissions, is_builtin, is_active, weight, created_at, updated_at) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+                (name, description, json.dumps(sorted(set(permissions))), False, True, int(weight), now, now),
             )
         conn.commit()
     except Exception:
@@ -788,7 +1317,8 @@ def update_role(role_name: str, **kwargs: Any) -> Optional[Dict[str, Any]]:
 
     Parameters:
         role_name: Current name of the role to update.
-        **kwargs: Fields to update — 'name' (rename), 'description', 'permissions'.
+        **kwargs: Fields to update — 'name' (rename), 'description',
+                  'permissions', 'weight', 'is_active'.
 
     The first positional parameter is ``role_name`` (not ``name``) so that
     callers can safely pass ``name=...`` in kwargs for rename operations
@@ -808,6 +1338,12 @@ def update_role(role_name: str, **kwargs: Any) -> Optional[Dict[str, Any]]:
 
     if "description" in kwargs:
         updates["description"] = kwargs["description"]
+
+    if "weight" in kwargs:
+        updates["weight"] = int(kwargs["weight"])
+
+    if "is_active" in kwargs:
+        updates["is_active"] = bool(kwargs["is_active"])
 
     if not updates:
         return get_role(role_name)
@@ -843,7 +1379,13 @@ def update_role(role_name: str, **kwargs: Any) -> Optional[Dict[str, Any]]:
 
 
 def delete_role(name: str) -> bool:
-    """Delete a custom (non-built-in) role."""
+    """Delete a custom (non-built-in) role.
+
+    This is a hard delete — the role and its permission set are removed
+    permanently. Users and API keys that referenced this role keep their
+    string value but will fail ``has_permission`` checks (they get an
+    empty permission set). Prefer :func:`disable_role` for safety.
+    """
     conn = _get_conn()
     try:
         with conn.cursor() as cur:
@@ -854,10 +1396,44 @@ def delete_role(name: str) -> bool:
             if row[0]:  # is_builtin
                 return False
 
+            # Prevent deletion if any active user/key still references this role
+            cur.execute("SELECT COUNT(*) FROM mgmt_users WHERE role = %s AND is_active = TRUE", (name,))
+            if cur.fetchone()[0] > 0:
+                raise ValueError(
+                    f"Role '{name}' is still assigned to active users. "
+                    "Reassign or disable those users first, or use disable_role() instead."
+                )
+            cur.execute("SELECT COUNT(*) FROM mgmt_api_keys WHERE role = %s AND is_active = TRUE", (name,))
+            if cur.fetchone()[0] > 0:
+                raise ValueError(
+                    f"Role '{name}' is still assigned to active API keys. "
+                    "Rotate or disable those keys first, or use disable_role() instead."
+                )
+
             cur.execute("DELETE FROM mgmt_roles WHERE name = %s AND is_builtin = FALSE", (name,))
             deleted = cur.rowcount > 0
         conn.commit()
         return deleted
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        _return_conn(conn)
+
+
+def enable_role(name: str) -> bool:
+    """Re-enable a previously disabled role."""
+    now = _now_iso()
+    conn = _get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE mgmt_roles SET is_active = TRUE, updated_at = %s WHERE name = %s AND is_active = FALSE",
+                (now, name),
+            )
+            found = cur.rowcount > 0
+        conn.commit()
+        return found
     except Exception:
         conn.rollback()
         return False
@@ -865,10 +1441,125 @@ def delete_role(name: str) -> bool:
         _return_conn(conn)
 
 
+def disable_role(name: str) -> bool:
+    """Disable a role without deleting it.
+
+    All API keys that reference this role will be rejected at validation
+    time (see :func:`validate_api_key`). Existing JWT sessions are not
+    affected — they expire naturally.
+    """
+    now = _now_iso()
+    conn = _get_conn()
+    try:
+        with conn.cursor() as cur:
+            # Block disabling the admin role (would lock out everyone)
+            if name == "admin":
+                raise ValueError("Refusing to disable the 'admin' role (would lock out all users)")
+            cur.execute(
+                "UPDATE mgmt_roles SET is_active = FALSE, updated_at = %s WHERE name = %s AND is_active = TRUE",
+                (now, name),
+            )
+            found = cur.rowcount > 0
+        conn.commit()
+        return found
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        _return_conn(conn)
+
+
+def list_role_users(name: str, include_inactive: bool = False) -> List[Dict[str, Any]]:
+    """Return all users that have been assigned a given role."""
+    cond = ["role = %s"]
+    params: list = [name]
+    if not include_inactive:
+        cond.append("is_active = TRUE")
+    where = "WHERE " + " AND ".join(cond)
+    conn = _get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"SELECT id, username, full_name, email, is_active, weight, last_login_at, created_at "
+                f"FROM mgmt_users {where} ORDER BY weight DESC, id",
+                params,
+            )
+            rows = cur.fetchall()
+            return [
+                {
+                    "id": r[0], "username": r[1], "full_name": r[2], "email": r[3],
+                    "is_active": 1 if r[4] else 0, "weight": r[5] or 0,
+                    "last_login_at": r[6], "created_at": r[7],
+                }
+                for r in rows
+            ]
+    finally:
+        _return_conn(conn)
+
+
+def list_role_keys(name: str, include_inactive: bool = False) -> List[Dict[str, Any]]:
+    """Return all API keys that have been assigned a given role."""
+    cond = ["role = %s"]
+    params: list = [name]
+    if not include_inactive:
+        cond.append("is_active = TRUE")
+    where = "WHERE " + " AND ".join(cond)
+    conn = _get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"SELECT id, key_prefix, user_id, name, is_active, weight, expires_at, created_at, last_used_at "
+                f"FROM mgmt_api_keys {where} ORDER BY weight DESC, id",
+                params,
+            )
+            rows = cur.fetchall()
+            return [
+                {
+                    "id": r[0], "key_prefix": _mask_key_prefix(r[1]), "user_id": r[2], "name": r[3],
+                    "is_active": 1 if r[4] else 0, "weight": r[5] or 0,
+                    "expires_at": r[6], "created_at": r[7], "last_used_at": r[8],
+                }
+                for r in rows
+            ]
+    finally:
+        _return_conn(conn)
+
+
+def gen_key_for_role(role_name: str, user_id: int, name: str = "",
+                     expires_days: Optional[int] = None,
+                     description: str = "",
+                     weight: int = 0) -> str:
+    """Generate a new API key already scoped to a given role.
+
+    This is a convenience helper — it validates that the role exists and
+    is active, then delegates to :func:`create_api_key`. The plaintext
+    key is returned ONCE.
+    """
+    role = get_role(role_name)
+    if role is None:
+        raise ValueError(f"Role '{role_name}' not found")
+    if not role.get("is_active"):
+        raise ValueError(f"Role '{role_name}' is disabled — enable it first")
+    return create_api_key(
+        user_id=user_id,
+        name=name or f"key-for-{role_name}",
+        role=role_name,
+        expires_days=expires_days,
+        description=description,
+        weight=weight,
+    )
+
+
 def get_role_permissions(role_name: str) -> set:
-    """Return the set of permission strings for a role."""
+    """Return the set of permission strings for a role.
+
+    v2.2: if the role has been disabled, returns an empty set so the
+    middleware denies all requests from users/keys with that role.
+    """
     role = get_role(role_name)
     if role:
+        if not role.get("is_active", 1):
+            return set()
         return set(role.get("permissions", []))
 
     # Fallback to default permissions from permissions module
@@ -909,20 +1600,198 @@ def has_specific_permission(role: str, permission: str) -> bool:
 
 
 # ═══════════════════════════════════════════════════════════════════════
+#  Stats / Bulk operations  (v2.2)
+# ═══════════════════════════════════════════════════════════════════════
+
+def get_mgmt_stats() -> Dict[str, Any]:
+    """Return a summary of users/keys/roles/audit for the mgmt dashboard.
+
+    v2.3.2: Added ``soon_to_expire_keys`` (keys expiring within 7 days)
+    and ``failed_logins_24h`` (count of failed login attempts in the
+    last 24 hours, derived from audit log action="POST /api/v1/auth/login"
+    AND status_code=401).
+    """
+    from datetime import timedelta
+    conn = _get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*), COALESCE(SUM(CASE WHEN is_active THEN 1 ELSE 0 END),0) FROM mgmt_users")
+            u_total, u_active = cur.fetchone()
+            cur.execute("SELECT COUNT(*), COALESCE(SUM(CASE WHEN is_active THEN 1 ELSE 0 END),0) FROM mgmt_api_keys")
+            k_total, k_active = cur.fetchone()
+            cur.execute("SELECT COUNT(*), COALESCE(SUM(CASE WHEN is_active THEN 1 ELSE 0 END),0) FROM mgmt_roles")
+            r_total, r_active = cur.fetchone()
+            cur.execute("SELECT COUNT(*) FROM mgmt_audit_log")
+            a_total = cur.fetchone()[0]
+
+            # v2.3.2: Soon-to-expire keys (active, expires_at within next 7 days)
+            soon_cutoff = (datetime.now(timezone.utc) + timedelta(days=7)).isoformat()
+            now_iso = datetime.now(timezone.utc).isoformat()
+            cur.execute(
+                "SELECT COUNT(*) FROM mgmt_api_keys "
+                "WHERE is_active = TRUE AND expires_at IS NOT NULL "
+                "AND expires_at <= %s AND expires_at > %s",
+                (soon_cutoff, now_iso),
+            )
+            soon_expire = cur.fetchone()[0] or 0
+
+            # v2.3.2: Failed logins in last 24 hours
+            # = audit entries with action="POST /api/v1/auth/login" AND status_code=401
+            cutoff_24h = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+            cur.execute(
+                "SELECT COUNT(*) FROM mgmt_audit_log "
+                "WHERE action = 'POST /api/v1/auth/login' "
+                "AND status_code = 401 "
+                "AND timestamp >= %s",
+                (cutoff_24h,),
+            )
+            failed_logins_24h = cur.fetchone()[0] or 0
+
+            # Successful logins in last 24 hours
+            cur.execute(
+                "SELECT COUNT(*) FROM mgmt_audit_log "
+                "WHERE action = 'POST /api/v1/auth/login' "
+                "AND status_code = 200 "
+                "AND timestamp >= %s",
+                (cutoff_24h,),
+            )
+            successful_logins_24h = cur.fetchone()[0] or 0
+
+            # per-role counts
+            cur.execute(
+                "SELECT r.name, r.is_active, "
+                " COALESCE(u.cnt, 0) AS users, COALESCE(k.cnt, 0) AS keys "
+                "FROM mgmt_roles r "
+                "LEFT JOIN (SELECT role, COUNT(*) AS cnt FROM mgmt_users GROUP BY role) u ON u.role = r.name "
+                "LEFT JOIN (SELECT role, COUNT(*) AS cnt FROM mgmt_api_keys GROUP BY role) k ON k.role = r.name "
+                "ORDER BY r.weight DESC, r.name"
+            )
+            rows = cur.fetchall()
+            roles = [
+                {"name": r[0], "is_active": 1 if r[1] else 0,
+                 "users": r[2], "keys": r[3]}
+                for r in rows
+            ]
+        return {
+            "users":     {"total": u_total or 0, "active": u_active or 0},
+            "api_keys":  {"total": k_total or 0, "active": k_active or 0,
+                          "soon_to_expire_7d": soon_expire},
+            "roles":     {"total": r_total or 0, "active": r_active or 0},
+            "audit_log": {"total": a_total or 0},
+            "auth":      {
+                "failed_logins_24h": failed_logins_24h,
+                "successful_logins_24h": successful_logins_24h,
+            },
+            "roles_breakdown": roles,
+        }
+    finally:
+        _return_conn(conn)
+
+
+def bulk_user_action(user_ids: List[int], action: str) -> Dict[str, Any]:
+    """Apply an action (enable/disable/purge) to multiple users.
+
+    Returns a dict with ``ok`` (list of user IDs that were successfully
+    changed) and ``failed`` (list of dicts ``{"id": int, "error": str}``).
+    """
+    ok: List[int] = []
+    failed: List[Dict[str, Any]] = []
+    for uid in user_ids:
+        try:
+            if action == "enable":
+                if enable_user(uid):
+                    ok.append(uid)
+                else:
+                    failed.append({"id": uid, "error": "not found or already enabled"})
+            elif action == "disable":
+                if disable_user(uid):
+                    ok.append(uid)
+                else:
+                    failed.append({"id": uid, "error": "not found or already disabled"})
+            elif action == "purge":
+                if purge_user(uid):
+                    ok.append(uid)
+                else:
+                    failed.append({"id": uid, "error": "not found"})
+            else:
+                raise ValueError(f"Unknown action: {action}")
+        except Exception as exc:
+            failed.append({"id": uid, "error": str(exc)})
+    return {"action": action, "ok": ok, "failed": failed}
+
+
+def bulk_key_action(key_ids: List[int], action: str) -> Dict[str, Any]:
+    """Apply an action (enable/disable/purge) to multiple API keys."""
+    ok: List[int] = []
+    failed: List[Dict[str, Any]] = []
+    for kid in key_ids:
+        try:
+            if action == "enable":
+                if enable_api_key(kid):
+                    ok.append(kid)
+                else:
+                    failed.append({"id": kid, "error": "not found, already enabled, or owning user inactive"})
+            elif action == "disable":
+                if disable_api_key(kid):
+                    ok.append(kid)
+                else:
+                    failed.append({"id": kid, "error": "not found or already disabled"})
+            elif action == "purge":
+                if purge_api_key(kid):
+                    ok.append(kid)
+                else:
+                    failed.append({"id": kid, "error": "not found"})
+            else:
+                raise ValueError(f"Unknown action: {action}")
+        except Exception as exc:
+            failed.append({"id": kid, "error": str(exc)})
+    return {"action": action, "ok": ok, "failed": failed}
+
+
+# ═══════════════════════════════════════════════════════════════════════
 #  Audit Log
 # ═══════════════════════════════════════════════════════════════════════
 
-def log_action(user_id: Optional[int], api_key_id: Optional[int], action: str,
-               endpoint: str = "", ip_address: str = "", details: Optional[str] = None) -> None:
-    """Append an entry to the audit log."""
+def log_action(
+    user_id: Optional[int], api_key_id: Optional[int], action: str,
+    endpoint: str = "", ip_address: str = "", details: Optional[str] = None,
+    *,
+    username: Optional[str] = None,
+    method: Optional[str] = None,
+    status_code: Optional[int] = None,
+    duration_ms: Optional[int] = None,
+    user_agent: Optional[str] = None,
+    request_body: Optional[str] = None,
+    auth_method: Optional[str] = None,
+    event_type: Optional[str] = None,
+) -> None:
+    """Append an entry to the audit log.
+
+    v2.3.2: Rich audit log — supports full HTTP context (method,
+    status_code, duration, user-agent, request body snippet) plus
+    semantic event_type (e.g. "user.created", "key.disabled") for
+    business-level events.
+
+    All fields except ``action`` are optional — backward-compatible
+    with existing callers.
+    """
     now = _now_iso()
+    # Truncate request_body to 4 KB — prevents storing huge uploads in audit
+    if request_body and len(request_body) > 4096:
+        request_body = request_body[:4093] + "..."
+
     conn = _get_conn()
     try:
         with conn.cursor() as cur:
             cur.execute(
-                "INSERT INTO mgmt_audit_log (user_id, api_key_id, action, endpoint, ip_address, timestamp, details) "
-                "VALUES (%s, %s, %s, %s, %s, %s, %s)",
-                (user_id, api_key_id, action, endpoint, ip_address, now, details),
+                "INSERT INTO mgmt_audit_log "
+                "(user_id, api_key_id, action, endpoint, ip_address, timestamp, details, "
+                " username, method, status_code, duration_ms, user_agent, request_body, "
+                " auth_method, event_type) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                (user_id, api_key_id, action, endpoint, ip_address, now, details,
+                 username, method, status_code, duration_ms, user_agent, request_body,
+                 auth_method, event_type),
             )
         conn.commit()
     except Exception as exc:
@@ -932,9 +1801,51 @@ def log_action(user_id: Optional[int], api_key_id: Optional[int], action: str,
         _return_conn(conn)
 
 
-def list_audit_log(user_id: Optional[int] = None, action: Optional[str] = None,
-                   endpoint: Optional[str] = None, offset: int = 0, limit: int = 100) -> List[Dict[str, Any]]:
-    """List audit log entries with filtering and pagination."""
+def log_semantic(
+    event_type: str,
+    *,
+    user_id: Optional[int] = None,
+    username: Optional[str] = None,
+    api_key_id: Optional[int] = None,
+    action: Optional[str] = None,
+    endpoint: Optional[str] = None,
+    ip_address: Optional[str] = None,
+    details: Optional[str] = None,
+    auth_method: Optional[str] = None,
+) -> None:
+    """Append a semantic (business-level) audit event.
+
+    Use this for events like "user.created", "key.disabled", "role.updated"
+    — separate from the HTTP-level ``log_action`` entries. Lets the
+    dashboard filter meaningful events without parsing HTTP logs.
+    """
+    log_action(
+        user_id=user_id,
+        api_key_id=api_key_id,
+        action=action or event_type,
+        endpoint=endpoint or "",
+        ip_address=ip_address or "",
+        details=details,
+        username=username,
+        event_type=event_type,
+        auth_method=auth_method,
+    )
+
+
+def list_audit_log(
+    user_id: Optional[int] = None, action: Optional[str] = None,
+    endpoint: Optional[str] = None, offset: int = 0, limit: int = 100,
+    event_type: Optional[str] = None,
+    auth_method: Optional[str] = None,
+    ip_address: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """List audit log entries with filtering and pagination.
+
+    v2.3.2: Returns all rich fields. New optional filters:
+    ``event_type`` (e.g. "user.created" for semantic events only),
+    ``auth_method`` ('jwt' / 'api_key' / 'static_api_key'),
+    ``ip_address`` (exact match).
+    """
     conditions = []
     params: list = []
 
@@ -947,6 +1858,15 @@ def list_audit_log(user_id: Optional[int] = None, action: Optional[str] = None,
     if endpoint is not None:
         conditions.append("endpoint LIKE %s")
         params.append(f"{endpoint}%")
+    if event_type is not None:
+        conditions.append("event_type = %s")
+        params.append(event_type)
+    if auth_method is not None:
+        conditions.append("auth_method = %s")
+        params.append(auth_method)
+    if ip_address is not None:
+        conditions.append("ip_address = %s")
+        params.append(ip_address)
 
     where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
     params.extend([offset, limit])
@@ -955,14 +1875,27 @@ def list_audit_log(user_id: Optional[int] = None, action: Optional[str] = None,
     try:
         with conn.cursor() as cur:
             cur.execute(
-                f"SELECT id, user_id, api_key_id, action, endpoint, ip_address, timestamp, details "
+                f"SELECT id, user_id, api_key_id, action, endpoint, ip_address, "
+                f"timestamp, details, username, method, status_code, duration_ms, "
+                f"user_agent, request_body, auth_method, event_type "
                 f"FROM mgmt_audit_log {where} ORDER BY id DESC OFFSET %s LIMIT %s",
                 params,
             )
             rows = cur.fetchall()
             return [
-                {"id": r[0], "user_id": r[1], "api_key_id": r[2], "action": r[3],
-                 "endpoint": r[4], "ip_address": r[5], "timestamp": r[6], "details": r[7]}
+                {
+                    "id": r[0], "user_id": r[1], "api_key_id": r[2],
+                    "action": r[3], "endpoint": r[4], "ip_address": r[5],
+                    "timestamp": r[6], "details": r[7],
+                    "username": r[8] or "",
+                    "method": r[9] or "",
+                    "status_code": r[10],
+                    "duration_ms": r[11],
+                    "user_agent": r[12] or "",
+                    "request_body": r[13] or "",
+                    "auth_method": r[14] or "",
+                    "event_type": r[15] or "",
+                }
                 for r in rows
             ]
     finally:

@@ -12,8 +12,8 @@ import subprocess
 import os
 from typing import List, Optional
 
-from sdb.config import LDBSEARCH_PATH, get_ldb_path
-from sdb.parser.ldif import LdifParser, LdifRecord
+from app.sdb_lib.config import LDBSEARCH_PATH, get_ldb_path
+from app.sdb_lib.parser.ldif import LdifParser, LdifRecord
 
 
 class LdbConnector:

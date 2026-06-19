@@ -927,6 +927,114 @@ Structure:
 
 
 # ═══════════════════════════════════════════════════════════════════════
+#  SDB System Prompt (v2.1.1 — API_SERVER_SDB_FIX.md)
+# ═══════════════════════════════════════════════════════════════════════
+#
+# Used by the new ``POST /api/v1/ai/sdb`` endpoint AND by ``/ai/assistant``
+# when the caller passes ``mode='sdb'``. Frontends that prefer to ship
+# their own SDB prompt can still do so by passing ``system=...`` — that
+# takes precedence over this constant (Variant 1 in the fix doc).
+
+SDB_SYSTEM_PROMPT = """Ты — AI-ассистент для работы с базой данных SDB (SamDB) Samba AD.
+Помогаешь пользователю выполнять SDB-запросы и СОЗДАВАТЬ ЛИСТЫ в DataForge с результатами.
+
+ГЛАВНОЕ: ОТВЕТ — JSON с actions. Не пиши свободный текст, всегда возвращай JSON.
+
+ФОРМАТ ОТВЕТА (СТРОГО):
+```json
+{{
+  "actions": [
+    {{
+      "type": "add_api_node",
+      "payload": {{
+        "node_id": "node_1",
+        "method": "POST",
+        "path": "/api/v1/sdb/script",
+        "operationId": "sdb_script_endpoint_api_v1_sdb_script_post",
+        "label": "Описательное имя листа",
+        "params": {{
+          "script": "USE sam;\\nFROM USERS;\\nSHOW AS json LIMIT 5;"
+        }}
+      }}
+    }}
+  ]
+}}
+```
+
+ТИП ДЕЙСТВИЯ: add_api_node (используй этот тип)
+- path: /api/v1/sdb/script (POST) — основной эндпоинт, поддерживает WHERE
+- method: "POST"
+- label: человекочитаемое имя листа в DataForge (ОБЯЗАТЕЛЬНО)
+- params.script: SDB-скрипт (РЕАЛЬНЫЙ, не {{USER_INPUT}}!)
+
+SDB СКРИПТ СИНТАКСИС:
+USE sam;
+FROM <TABLE> [WHERE <condition>];
+SHOW AS json LIMIT <N>;
+
+ТАБЛИЦЫ: USERS, GROUPS, COMPUTERS, OUS, GPOS, CONTACTS, DNS_RECORDS
+
+ПРИМЕРЫ:
+1. "показать 5 пользователей":
+   script: "USE sam;\\nFROM USERS;\\nSHOW AS json LIMIT 5;"
+2. "admin пользователи":
+   script: "USE sam;\\nFROM USERS WHERE adminCount = 1;\\nSHOW AS json LIMIT 100;"
+3. "отключённые":
+   script: "USE sam;\\nFROM USERS WHERE userAccountControl = '2';\\nSHOW AS json LIMIT 500;"
+4. "компьютеры с Windows 10":
+   script: "USE sam;\\nFROM COMPUTERS WHERE operatingSystem LIKE 'Windows 10%';\\nSHOW AS json LIMIT 500;"
+
+ПРАВИЛА:
+1. ВСЕГДА возвращай JSON с actions.
+2. НИКОГДА не используй {{USER_INPUT}} — подставляй РЕАЛЬНЫЙ SDB-скрипт.
+3. Если пользователь указал количество (5, 10, 100) — поставь это в LIMIT.
+4. ВСЕГДА указывай "label" — это станет именем листа в DataForge.
+5. В Safe Mode значения секретов маскируются — НЕ пытайся угадать.
+
+userAccountControl:
+- 2 = ACCOUNTDISABLE
+- 512 = NORMAL_ACCOUNT
+- adminCount = 1 у админских учёток
+"""
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  Mode → system prompt resolver (v2.1.1 — API_SERVER_SDB_FIX.md Variant 3)
+# ═══════════════════════════════════════════════════════════════════════
+
+
+def resolve_system_prompt(
+    request_system: Optional[str],
+    request_mode: Optional[str],
+    api_schema: str = "",
+    safe_mode_note: str = "",
+) -> str:
+    """Pick the system prompt to send to the LLM.
+
+    Precedence (per API_SERVER_SDB_FIX.md):
+
+    1. ``request_system`` — if the caller supplied an explicit system
+       prompt, use it verbatim. (Variant 1)
+    2. ``request_mode == 'sdb'`` — use :data:`SDB_SYSTEM_PROMPT`.
+       (Variant 3)
+    3. ``request_mode == 'agent'`` — fall back to a minimal agent
+       prompt (the full agent prompt is built elsewhere; here we use
+       a short placeholder that the chat router overrides).
+    4. Default — the ETL Constructor ``SYSTEM_PROMPT`` formatted with
+       ``api_schema`` and ``safe_mode_note``.
+    """
+    if request_system:
+        return request_system
+    if request_mode == "sdb":
+        return SDB_SYSTEM_PROMPT
+    # Default: ETL Constructor
+    return SYSTEM_PROMPT.format(
+        api_schema=api_schema,
+        safe_mode_note=safe_mode_note,
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════
 #  Main Processing Function
 # ═══════════════════════════════════════════════════════════════════════
 
@@ -965,18 +1073,31 @@ async def process_ai_request(request: AIRequest) -> AIResponse:
 
     # 3. Build system prompt
     safe_mode_note = " (ACTIVE — data values hidden)" if request.safe_mode else " (OFF — data visible)"
-    system_prompt = SYSTEM_PROMPT.format(
-        api_schema=compressed_schema,
-        safe_mode_note=safe_mode_note,
-    )
+
+    # v2.1.1 (API_SERVER_SDB_FIX.md): allow the caller to override the
+    # hardcoded ETL Constructor system prompt via `request.system` or
+    # `request.mode`. When neither is supplied, behaviour is unchanged.
+    if getattr(request, "system", None) or getattr(request, "mode", None):
+        system_prompt = resolve_system_prompt(
+            request_system=request.system,
+            request_mode=request.mode,
+            api_schema=compressed_schema,
+            safe_mode_note=safe_mode_note,
+        )
+    else:
+        system_prompt = SYSTEM_PROMPT.format(
+            api_schema=compressed_schema,
+            safe_mode_note=safe_mode_note,
+        )
 
     # v1.6.8-5: Log estimated prompt tokens
     est_prompt_tokens = _estimate_tokens(system_prompt)
     logger.info(
         "[AI] System prompt: %d chars, ~%d est tokens. Schema: %d chars. "
-        "max_tokens=%d, est_total~%d",
+        "max_tokens=%d, est_total~%d (mode=%s, system_override=%s)",
         len(system_prompt), est_prompt_tokens, len(compressed_schema),
         settings.AI_MAX_TOKENS, est_prompt_tokens + settings.AI_MAX_TOKENS,
+        getattr(request, "mode", None), bool(getattr(request, "system", None)),
     )
 
     # 4. Build user message
@@ -988,6 +1109,10 @@ async def process_ai_request(request: AIRequest) -> AIResponse:
             f"\n[CURRENT TASK CONTEXT (Safe Mode: {request.safe_mode})]:\n"
             + json.dumps(user_context, ensure_ascii=False, indent=2)
         )
+    # v2.1.1: Append optional [DATA CONTEXT] block (per API_SERVER_SDB_FIX.md).
+    data_ctx = getattr(request, "data", None)
+    if data_ctx:
+        user_message_parts.append(f"\n[DATA CONTEXT]:\n{data_ctx}")
     user_message = "\n".join(user_message_parts)
 
     # v2.0.2 fix: Use Polza.ai model (POLZA_AI_MODEL) instead of AI_DEFAULT_MODEL
@@ -1116,4 +1241,51 @@ async def process_ai_request(request: AIRequest) -> AIResponse:
             cost_rub=cost_rub,
             provider=usage_info.get("provider") if usage_info else None,
         ) if usage_info else None,
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  SDB AI Request (v2.1.1 — API_SERVER_SDB_FIX.md)
+# ═══════════════════════════════════════════════════════════════════════
+
+
+async def process_sdb_request(request: "AISdbRequest") -> "AISdbResponse":
+    """Process an SDB-mode AI request and return structured actions.
+
+    This is a thin wrapper around :func:`process_ai_request` that:
+
+    1. Reuses the existing Polza.ai call + retry + schema-validation
+       pipeline (no duplicated LLM code).
+    2. Forces ``mode='sdb'`` so :func:`resolve_system_prompt` picks
+       :data:`SDB_SYSTEM_PROMPT` unless the caller passed ``system``.
+    3. Wraps the result in :class:`AISdbResponse` so the OpenAPI
+       schema documents a distinct return type for ``/api/v1/ai/sdb``.
+    """
+    # Local import to avoid a circular dependency at module load time
+    # (app.models.ai imports nothing from this module, but importing it
+    # lazily keeps the surface area small).
+    from app.models.ai import AISdbRequest, AISdbResponse
+
+    # Translate the SDB request into an AIRequest with mode='sdb'.
+    inner = AIRequest(
+        prompt=request.prompt,
+        context=request.context,
+        safe_mode=request.safe_mode,
+        model_override=request.model_override,
+        system=request.system,   # may be None → resolver uses SDB_SYSTEM_PROMPT
+        data=request.data,
+        mode="sdb",              # forces SDB_SYSTEM_PROMPT unless `system` overrides
+    )
+
+    inner_resp = await process_ai_request(inner)
+    return AISdbResponse(
+        status=inner_resp.status,
+        message=inner_resp.message,
+        actions=inner_resp.actions,
+        model_used=inner_resp.model_used,
+        tokens_used=inner_resp.tokens_used,
+        error=inner_resp.error,
+        retries=inner_resp.retries,
+        usage=inner_resp.usage,
+        mode="sdb",
     )

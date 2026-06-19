@@ -24,22 +24,23 @@ import argparse
 import os
 import re
 
-# Добавляем текущую и родительскую директорию в путь,
-# чтобы работало и с sudo, и из любой директории
-_cli_dir = os.path.dirname(os.path.abspath(__file__))
-_parent_dir = os.path.dirname(_cli_dir)
+# Добавляем пути в sys.path, чтобы работало и с sudo, и из любой директории
+# Нужно чтобы проектный корень (содержащий app/) был в sys.path
+_cli_dir = os.path.dirname(os.path.abspath(__file__))    # app/sdb_lib/
+_app_dir = os.path.dirname(_cli_dir)                      # app/
+_project_dir = os.path.dirname(_app_dir)                   # проектный корень
 _cwd = os.getcwd()
-for p in [_cli_dir, _parent_dir, _cwd]:
+for p in [_project_dir, _app_dir, _cli_dir, _cwd]:
     if p not in sys.path:
         sys.path.insert(0, p)
 
-from sdb.client import SdbClient
-from sdb.parser.ldif import parse_ldif_file
-from sdb.completer import SdbCompleter, setup_readline
+from app.sdb_lib.client import SdbClient
+from app.sdb_lib.parser.ldif import parse_ldif_file
+from app.sdb_lib.completer import SdbCompleter, setup_readline
 
 # ─── Команды, которые можно выполнить без ; ────────────────────────────────
 _SINGLE_WORD_COMMANDS = {
-    "dataframe", "quit", "exit", "help", "?",
+    "dataframe", "full", "quit", "exit", "help", "?",
 }
 
 _COMPLETE_COMMAND_PATTERNS = [
@@ -181,7 +182,7 @@ def main():
 
     # ─── Интерактивный режим ───────────────────────────────────────────────
     sudo_info = "sudo" if use_sudo else "без sudo"
-    print(f"SDB - Samba Database Query Tool v1.2.3-5 ({sudo_info})")
+    print(f"SDB - Samba Database Query Tool v1.2.3-6 ({sudo_info})")
     print("Введите команду или 'help' для справки, 'quit' для выхода")
     print("Команды можно вводить без ; (авто-выполнение по Enter)")
     print("TAB - автодополнение команд, баз данных, имён из БД")
@@ -320,8 +321,8 @@ def _print_help(use_sudo=True):
 
   FORMAT <fmt>              Установить формат вывода:
                             json, csv, tsv, table, table_presto, table_grid,
-                            table_simple, table_rounded, table_double, ldif, dataframe,
-                            xlsx
+                            table_simple, table_rounded, table_double, ldif, vertical,
+                            dataframe, xlsx
 
   OUTPUT <file>             Записать последний результат в файл
                             (авто-определение формата по расширению: .xlsx, .json, .csv, .tsv)
@@ -331,6 +332,10 @@ def _print_help(use_sudo=True):
   LIMIT <number>            Ограничить количество записей
 
   DATAFRAME                 Показать результат как pandas DataFrame
+
+  FULL [N]                  Вывод с нумерацией колонок (для web API)
+                            N — начальный номер (FULL 1 = нумерация с 1)
+  FULL; OUTPUT f.json       Записать FULL результат в JSON
 
   ── Сокращённые команды (без TOOL) ──────────────────────────────────
 

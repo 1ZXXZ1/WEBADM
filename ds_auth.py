@@ -578,13 +578,14 @@ def user_grp(ctx: click.Context) -> None:
 @user_grp.command("list", help="Список пользователей.")
 @click.option("--role", default=None, help="Фильтр по роли.")
 @click.option("--active", type=bool, default=None, help="Фильтр по активности (true/false).")
+@click.option("--search", "-s", default=None, help="Поиск по username/full_name/email.")
 @click.option("--offset", default=0, help="Смещение пагинации.")
 @click.option("--limit", default=100, help="Размер страницы.")
 @click.pass_context
-def user_list(ctx: click.Context, role: Optional[str], active: Optional[bool], offset: int, limit: int) -> None:
+def user_list(ctx: click.Context, role: Optional[str], active: Optional[bool], search: Optional[str], offset: int, limit: int) -> None:
     """Показать список пользователей Management API."""
     client = _get_client(ctx)
-    result = client.get("/api/v1/mgmt/users", params={"role": role, "is_active": active, "offset": offset, "limit": limit})
+    result = client.get("/api/v1/mgmt/users", params={"role": role, "is_active": active, "search": search, "offset": offset, "limit": limit})
 
     if _is_json(ctx):
         _out_json(result)
@@ -606,11 +607,12 @@ def user_list(ctx: click.Context, role: Optional[str], active: Optional[bool], o
                 str(u.get("full_name", "")),
                 str(u.get("email", "")),
                 "Да" if u.get("is_active", True) else "Нет",
-                str(u.get("created_at", ""))[:19],
+                str(u.get("weight", 0)),
+                str(u.get("last_login_at", "") or "")[:19],
             ])
 
     _print_table(
-        ["ID", "Логин", "Роль", "Имя", "Email", "Активен", "Создан"],
+        ["ID", "Логин", "Роль", "Имя", "Email", "Активен", "Вес", "Посл. вход"],
         rows,
         title="Пользователи API",
     )
@@ -622,14 +624,20 @@ def user_list(ctx: click.Context, role: Optional[str], active: Optional[bool], o
 @click.option("--role", "-r", default="operator", show_default=True, help="Роль (admin, operator, auditor, кастомная).")
 @click.option("--full-name", default=None, help="Полное имя.")
 @click.option("--email", default=None, help="Email.")
+@click.option("--weight", "-w", type=int, default=0, show_default=True, help="Вес/приоритет (выше = важнее).")
 @click.pass_context
-def user_create(ctx: click.Context, username: str, password: str, role: str, full_name: Optional[str], email: Optional[str]) -> None:
+def user_create(ctx: click.Context, username: str, password: str, role: str, full_name: Optional[str], email: Optional[str], weight: int) -> None:
     """Создать нового пользователя Management API."""
     client = _get_client(ctx)
-    result = client.post(
-        "/api/v1/mgmt/users",
-        params={"username": username, "password": password, "role": role, "full_name": full_name or "", "email": email or ""},
-    )
+    body = {
+        "username": username,
+        "password": password,
+        "role": role,
+        "full_name": full_name or "",
+        "email": email or "",
+        "weight": weight,
+    }
+    result = client.post("/api/v1/mgmt/users", json_body=body)
 
     if _is_json(ctx):
         _out_json(result)
@@ -640,6 +648,7 @@ def user_create(ctx: click.Context, username: str, password: str, role: str, ful
     if isinstance(data, dict):
         click.echo(f"  ID:   {data.get('id', '?')}")
         click.echo(f"  Роль: {data.get('role', role)}")
+        click.echo(f"  Вес:  {data.get('weight', weight)}")
 
 
 @user_grp.command("show", help="Показать пользователя.")
@@ -669,28 +678,31 @@ def user_show(ctx: click.Context, user_id: int) -> None:
 @click.option("--full-name", default=None, help="Новое полное имя.")
 @click.option("--email", default=None, help="Новый email.")
 @click.option("--active/--inactive", default=None, help="Активировать/деактивировать.")
+@click.option("--weight", "-w", type=int, default=None, help="Новый вес/приоритет.")
 @click.pass_context
-def user_edit(ctx: click.Context, user_id: int, username: Optional[str], password: Optional[str], role: Optional[str], full_name: Optional[str], email: Optional[str], active: Optional[bool]) -> None:
+def user_edit(ctx: click.Context, user_id: int, username: Optional[str], password: Optional[str], role: Optional[str], full_name: Optional[str], email: Optional[str], active: Optional[bool], weight: Optional[int]) -> None:
     """Редактировать атрибуты пользователя Management API."""
     client = _get_client(ctx)
-    params: Dict[str, Any] = {}
+    body: Dict[str, Any] = {}
     if username is not None:
-        params["username"] = username
+        body["username"] = username
     if password is not None:
-        params["password"] = password
+        body["password"] = password
     if role is not None:
-        params["role"] = role
+        body["role"] = role
     if full_name is not None:
-        params["full_name"] = full_name
+        body["full_name"] = full_name
     if email is not None:
-        params["email"] = email
+        body["email"] = email
     if active is not None:
-        params["is_active"] = active
+        body["is_active"] = active
+    if weight is not None:
+        body["weight"] = weight
 
-    if not params:
+    if not body:
         raise click.ClickException("Укажите хотя бы одно поле для обновления.")
 
-    result = client.put(f"/api/v1/mgmt/users/{user_id}", params=params)
+    result = client.put(f"/api/v1/mgmt/users/{user_id}", json_body=body)
 
     if _is_json(ctx):
         _out_json(result)
@@ -699,23 +711,144 @@ def user_edit(ctx: click.Context, user_id: int, username: Optional[str], passwor
     click.secho(f"\n  Пользователь #{user_id} обновлён!", fg="green", bold=True)
 
 
-@user_grp.command("delete", help="Удалить (деактивировать) пользователя.")
+@user_grp.command("delete", help="Удалить пользователя (по умолчанию мягко).")
 @click.argument("user_id", type=int)
+@click.option("--hard", is_flag=True, help="Жёсткое удаление (безвозвратно).")
 @click.option("--confirm", is_flag=True, help="Подтвердить удаление.")
 @click.pass_context
-def user_delete(ctx: click.Context, user_id: int, confirm: bool) -> None:
-    """Деактивировать пользователя Management API (мягкое удаление)."""
+def user_delete(ctx: click.Context, user_id: int, hard: bool, confirm: bool) -> None:
+    """Удалить пользователя Management API.
+
+    Без --hard: мягкое удаление (is_active=FALSE, ключи деактивируются).
+    С --hard: безвозвратное удаление строки и всех его API-ключей (CASCADE).
+    """
+    action = "безвозвратно удалить" if hard else "деактивировать"
     if not confirm:
-        click.confirm(f"Деактивировать пользователя #{user_id}?", abort=True)
+        click.confirm(f"{action.capitalize()} пользователя #{user_id}?", abort=True)
 
     client = _get_client(ctx)
-    result = client.delete(f"/api/v1/mgmt/users/{user_id}")
+    result = client.delete(f"/api/v1/mgmt/users/{user_id}", params={"hard": "true" if hard else "false"})
 
     if _is_json(ctx):
         _out_json(result)
         return
 
-    click.secho(f"\n  Пользователь #{user_id} деактивирован!", fg="green", bold=True)
+    click.secho(f"\n  Пользователь #{user_id} {action}!", fg="green", bold=True)
+
+
+@user_grp.command("enable", help="Включить пользователя (is_active=TRUE).")
+@click.argument("user_id", type=int)
+@click.pass_context
+def user_enable(ctx: click.Context, user_id: int) -> None:
+    """Активировать ранее отключённого пользователя."""
+    client = _get_client(ctx)
+    result = client.post(f"/api/v1/mgmt/users/{user_id}/enable")
+
+    if _is_json(ctx):
+        _out_json(result)
+        return
+
+    click.secho(f"\n  Пользователь #{user_id} включён!", fg="green", bold=True)
+    click.secho("  Примечание: API-ключи пользователя НЕ активируются автоматически.", fg="yellow")
+
+
+@user_grp.command("disable", help="Отключить пользователя (мягко, с ключами).")
+@click.argument("user_id", type=int)
+@click.pass_context
+def user_disable(ctx: click.Context, user_id: int) -> None:
+    """Отключить пользователя и все его API-ключи (мягко)."""
+    client = _get_client(ctx)
+    result = client.post(f"/api/v1/mgmt/users/{user_id}/disable")
+
+    if _is_json(ctx):
+        _out_json(result)
+        return
+
+    click.secho(f"\n  Пользователь #{user_id} отключён (включая все его API-ключи)!", fg="green", bold=True)
+
+
+@user_grp.command("purge", help="Безвозвратно удалить пользователя.")
+@click.argument("user_id", type=int)
+@click.option("--confirm", is_flag=True, help="Подтвердить безвозвратное удаление.")
+@click.pass_context
+def user_purge(ctx: click.Context, user_id: int, confirm: bool) -> None:
+    """Безвозвратно удалить пользователя и все его API-ключи (CASCADE)."""
+    if not confirm:
+        click.confirm(f"БЕЗВОЗВРАТНО удалить пользователя #{user_id} и все его API-ключи?", abort=True)
+
+    client = _get_client(ctx)
+    result = client.post(f"/api/v1/mgmt/users/{user_id}/purge")
+
+    if _is_json(ctx):
+        _out_json(result)
+        return
+
+    click.secho(f"\n  Пользователь #{user_id} безвозвратно удалён!", fg="red", bold=True)
+
+
+@user_grp.command("reset-password", help="Сбросить пароль пользователя.")
+@click.argument("user_id", type=int)
+@click.option("--password", "-p", default=None, help="Новый пароль. Если не указан — генерируется случайный.")
+@click.pass_context
+def user_reset_password(ctx: click.Context, user_id: int, password: Optional[str]) -> None:
+    """Сбросить пароль пользователя.
+
+    Если --password не указан, сервер сгенерирует случайный пароль и вернёт его.
+    """
+    client = _get_client(ctx)
+    body = {"new_password": password} if password else {}
+    result = client.post(f"/api/v1/mgmt/users/{user_id}/reset-password", json_body=body)
+
+    if _is_json(ctx):
+        _out_json(result)
+        return
+
+    click.secho(f"\n  Пароль пользователя #{user_id} сброшен!", fg="green", bold=True)
+    data = result.get("data") or {}
+    new_pw = data.get("new_password") if isinstance(data, dict) else None
+    if new_pw:
+        click.secho(f"  Новый сгенерированный пароль: {new_pw}", fg="cyan", bold=True)
+        click.secho("  ВНИМАНИЕ: пароль показывается только один раз!", fg="yellow", bold=True)
+
+
+@user_grp.command("keys", help="Показать API-ключи пользователя.")
+@click.argument("user_id", type=int)
+@click.option("--include-inactive", is_flag=True, help="Включая отключённые ключи.")
+@click.pass_context
+def user_keys(ctx: click.Context, user_id: int, include_inactive: bool) -> None:
+    """Показать все API-ключи указанного пользователя."""
+    client = _get_client(ctx)
+    result = client.get(
+        f"/api/v1/mgmt/users/{user_id}/keys",
+        params={"include_inactive": "true" if include_inactive else "false"},
+    )
+
+    if _is_json(ctx):
+        _out_json(result)
+        return
+
+    keys = result.get("data", [])
+    if isinstance(keys, dict) and "keys" in keys:
+        keys = keys["keys"]
+
+    rows = []
+    for k in keys:
+        if isinstance(k, dict):
+            rows.append([
+                str(k.get("id", "")),
+                str(k.get("name", "")),
+                str(k.get("role", "")),
+                "Да" if k.get("is_active", True) else "Нет",
+                str(k.get("weight", 0)),
+                str(k.get("expires_at", "никогда"))[:19],
+                str(k.get("created_at", ""))[:19],
+            ])
+
+    _print_table(
+        ["ID", "Имя", "Роль", "Активен", "Вес", "Истекает", "Создан"],
+        rows,
+        title=f"API-ключи пользователя #{user_id}",
+    )
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -733,13 +866,14 @@ def key_grp(ctx: click.Context) -> None:
 @key_grp.command("list", help="Список API-ключей.")
 @click.option("--user-id", type=int, default=None, help="Фильтр по ID пользователя.")
 @click.option("--active", type=bool, default=None, help="Фильтр по активности.")
+@click.option("--search", "-s", default=None, help="Поиск по name/description.")
 @click.option("--offset", default=0, help="Смещение пагинации.")
 @click.option("--limit", default=100, help="Размер страницы.")
 @click.pass_context
-def key_list(ctx: click.Context, user_id: Optional[int], active: Optional[bool], offset: int, limit: int) -> None:
+def key_list(ctx: click.Context, user_id: Optional[int], active: Optional[bool], search: Optional[str], offset: int, limit: int) -> None:
     """Показать список API-ключей."""
     client = _get_client(ctx)
-    result = client.get("/api/v1/mgmt/keys", params={"user_id": user_id, "is_active": active, "offset": offset, "limit": limit})
+    result = client.get("/api/v1/mgmt/keys", params={"user_id": user_id, "is_active": active, "search": search, "offset": offset, "limit": limit})
 
     if _is_json(ctx):
         _out_json(result)
@@ -760,12 +894,13 @@ def key_list(ctx: click.Context, user_id: Optional[int], active: Optional[bool],
                 str(k.get("user_id", "")),
                 str(k.get("role", "")),
                 "Да" if k.get("is_active", True) else "Нет",
+                str(k.get("weight", 0)),
                 str(k.get("expires_at", "никогда"))[:19],
                 str(k.get("created_at", ""))[:19],
             ])
 
     _print_table(
-        ["ID", "Имя", "User ID", "Роль", "Активен", "Истекает", "Создан"],
+        ["ID", "Имя", "User ID", "Роль", "Активен", "Вес", "Истекает", "Создан"],
         rows,
         title="API-ключи",
     )
@@ -776,14 +911,22 @@ def key_list(ctx: click.Context, user_id: Optional[int], active: Optional[bool],
 @click.option("--name", "-n", required=True, help="Название/описание ключа.")
 @click.option("--role", "-r", default="operator", show_default=True, help="Роль ключа.")
 @click.option("--expires-days", type=int, default=None, help="Дней до истечения (без лимита если не указано).")
+@click.option("--weight", "-w", type=int, default=0, show_default=True, help="Вес/приоритет ключа.")
+@click.option("--description", "-d", default="", help="Длинное описание ключа.")
 @click.pass_context
-def key_create(ctx: click.Context, user_id: int, name: str, role: str, expires_days: Optional[int]) -> None:
+def key_create(ctx: click.Context, user_id: int, name: str, role: str, expires_days: Optional[int], weight: int, description: str) -> None:
     """Создать новый API-ключ. ПРИМЕЧАНИЕ: ключ показывается только один раз!"""
     client = _get_client(ctx)
-    result = client.post(
-        "/api/v1/mgmt/keys",
-        params={"user_id": user_id, "name": name, "role": role, "expires_days": expires_days},
-    )
+    body = {
+        "user_id": user_id,
+        "name": name,
+        "role": role,
+        "weight": weight,
+        "description": description,
+    }
+    if expires_days is not None:
+        body["expires_days"] = expires_days
+    result = client.post("/api/v1/mgmt/keys", json_body=body)
 
     if _is_json(ctx):
         _out_json(result)
@@ -832,24 +975,30 @@ def key_show(ctx: click.Context, key_id: int) -> None:
 @click.option("--role", default=None, help="Новая роль.")
 @click.option("--active/--inactive", default=None, help="Активировать/деактивировать.")
 @click.option("--expires-days", type=int, default=None, help="Сбросить срок действия (дней от сейчас).")
+@click.option("--weight", "-w", type=int, default=None, help="Новый вес/приоритет.")
+@click.option("--description", "-d", default=None, help="Новое описание.")
 @click.pass_context
-def key_edit(ctx: click.Context, key_id: int, name: Optional[str], role: Optional[str], active: Optional[bool], expires_days: Optional[int]) -> None:
+def key_edit(ctx: click.Context, key_id: int, name: Optional[str], role: Optional[str], active: Optional[bool], expires_days: Optional[int], weight: Optional[int], description: Optional[str]) -> None:
     """Редактировать атрибуты API-ключа."""
     client = _get_client(ctx)
-    params: Dict[str, Any] = {}
+    body: Dict[str, Any] = {}
     if name is not None:
-        params["name"] = name
+        body["name"] = name
     if role is not None:
-        params["role"] = role
+        body["role"] = role
     if active is not None:
-        params["is_active"] = active
+        body["is_active"] = active
     if expires_days is not None:
-        params["expires_days"] = expires_days
+        body["expires_days"] = expires_days
+    if weight is not None:
+        body["weight"] = weight
+    if description is not None:
+        body["description"] = description
 
-    if not params:
+    if not body:
         raise click.ClickException("Укажите хотя бы одно поле для обновления.")
 
-    result = client.put(f"/api/v1/mgmt/keys/{key_id}", params=params)
+    result = client.put(f"/api/v1/mgmt/keys/{key_id}", json_body=body)
 
     if _is_json(ctx):
         _out_json(result)
@@ -858,23 +1007,81 @@ def key_edit(ctx: click.Context, key_id: int, name: Optional[str], role: Optiona
     click.secho(f"\n  API-ключ #{key_id} обновлён!", fg="green", bold=True)
 
 
-@key_grp.command("delete", help="Удалить (деактивировать) API-ключ.")
+@key_grp.command("delete", help="Удалить API-ключ (по умолчанию мягко).")
 @click.argument("key_id", type=int)
+@click.option("--hard", is_flag=True, help="Жёсткое удаление (безвозвратно).")
 @click.option("--confirm", is_flag=True, help="Подтвердить удаление.")
 @click.pass_context
-def key_delete(ctx: click.Context, key_id: int, confirm: bool) -> None:
-    """Деактивировать API-ключ."""
+def key_delete(ctx: click.Context, key_id: int, hard: bool, confirm: bool) -> None:
+    """Удалить API-ключ.
+
+    Без --hard: мягкое удаление (is_active=FALSE).
+    С --hard: безвозвратное удаление строки.
+    """
+    action = "безвозвратно удалить" if hard else "деактивировать"
     if not confirm:
-        click.confirm(f"Деактивировать API-ключ #{key_id}?", abort=True)
+        click.confirm(f"{action.capitalize()} API-ключ #{key_id}?", abort=True)
 
     client = _get_client(ctx)
-    result = client.delete(f"/api/v1/mgmt/keys/{key_id}")
+    result = client.delete(f"/api/v1/mgmt/keys/{key_id}", params={"hard": "true" if hard else "false"})
 
     if _is_json(ctx):
         _out_json(result)
         return
 
-    click.secho(f"\n  API-ключ #{key_id} деактивирован!", fg="green", bold=True)
+    click.secho(f"\n  API-ключ #{key_id} {action}!", fg="green", bold=True)
+
+
+@key_grp.command("enable", help="Включить API-ключ.")
+@click.argument("key_id", type=int)
+@click.pass_context
+def key_enable(ctx: click.Context, key_id: int) -> None:
+    """Активировать ранее отключённый API-ключ.
+
+    Пользователь-владелец должен быть активен.
+    """
+    client = _get_client(ctx)
+    result = client.post(f"/api/v1/mgmt/keys/{key_id}/enable")
+
+    if _is_json(ctx):
+        _out_json(result)
+        return
+
+    click.secho(f"\n  API-ключ #{key_id} включён!", fg="green", bold=True)
+
+
+@key_grp.command("disable", help="Отключить API-ключ (мягко).")
+@click.argument("key_id", type=int)
+@click.pass_context
+def key_disable(ctx: click.Context, key_id: int) -> None:
+    """Деактивировать API-ключ (мягко)."""
+    client = _get_client(ctx)
+    result = client.post(f"/api/v1/mgmt/keys/{key_id}/disable")
+
+    if _is_json(ctx):
+        _out_json(result)
+        return
+
+    click.secho(f"\n  API-ключ #{key_id} отключён!", fg="green", bold=True)
+
+
+@key_grp.command("purge", help="Безвозвратно удалить API-ключ.")
+@click.argument("key_id", type=int)
+@click.option("--confirm", is_flag=True, help="Подтвердить безвозвратное удаление.")
+@click.pass_context
+def key_purge(ctx: click.Context, key_id: int, confirm: bool) -> None:
+    """Безвозвратно удалить API-ключ."""
+    if not confirm:
+        click.confirm(f"БЕЗВОЗВРАТНО удалить API-ключ #{key_id}?", abort=True)
+
+    client = _get_client(ctx)
+    result = client.post(f"/api/v1/mgmt/keys/{key_id}/purge")
+
+    if _is_json(ctx):
+        _out_json(result)
+        return
+
+    click.secho(f"\n  API-ключ #{key_id} безвозвратно удалён!", fg="red", bold=True)
 
 
 @key_grp.command("rotate", help="Ротация API-ключа (старый деактивируется, новый создаётся).")
@@ -912,11 +1119,15 @@ def role_grp(ctx: click.Context) -> None:
 
 
 @role_grp.command("list", help="Список всех ролей.")
+@click.option("--hide-disabled", is_flag=True, help="Скрыть отключённые роли.")
 @click.pass_context
-def role_list(ctx: click.Context) -> None:
+def role_list(ctx: click.Context, hide_disabled: bool) -> None:
     """Показать список всех ролей с их правами."""
     client = _get_client(ctx)
-    result = client.get("/api/v1/mgmt/roles")
+    result = client.get(
+        "/api/v1/mgmt/roles",
+        params={"include_disabled": "false" if hide_disabled else "true"},
+    )
 
     if _is_json(ctx):
         _out_json(result)
@@ -934,15 +1145,18 @@ def role_list(ctx: click.Context) -> None:
             perms = r.get("permissions", [])
             perm_count = len(perms) if isinstance(perms, list) else 0
             builtin = "Да" if r.get("is_builtin", r.get("name") in ("admin", "operator", "auditor")) else "Нет"
+            active = "Да" if r.get("is_active", 1) else "Нет"
             rows.append([
                 str(r.get("name", "")),
                 str(r.get("description", "")),
                 str(perm_count),
                 builtin,
+                active,
+                str(r.get("weight", 0)),
             ])
 
     _print_table(
-        ["Роль", "Описание", "Кол-во прав", "Встроенная"],
+        ["Роль", "Описание", "Кол-во прав", "Встроенная", "Активна", "Вес"],
         rows,
         title="Роли",
     )
@@ -988,8 +1202,9 @@ def role_show(ctx: click.Context, role_name: str) -> None:
 @click.option("--description", "-d", default="", help="Описание роли.")
 @click.option("--permissions", "-p", default=None, help="Права через запятую (например: user.create,user.delete,dns.zonecreate).")
 @click.option("--permissions-file", default=None, help="Файл JSON со списком прав.")
+@click.option("--weight", "-w", type=int, default=0, show_default=True, help="Вес/приоритет роли.")
 @click.pass_context
-def role_create(ctx: click.Context, name: str, description: str, permissions: Optional[str], permissions_file: Optional[str]) -> None:
+def role_create(ctx: click.Context, name: str, description: str, permissions: Optional[str], permissions_file: Optional[str], weight: int) -> None:
     """Создать новую роль с указанными правами."""
     perm_list: List[str] = []
 
@@ -1009,7 +1224,7 @@ def role_create(ctx: click.Context, name: str, description: str, permissions: Op
     client = _get_client(ctx)
     result = client.post(
         "/api/v1/mgmt/roles",
-        json_body={"name": name, "description": description, "permissions": perm_list},
+        json_body={"name": name, "description": description, "permissions": perm_list, "weight": weight},
     )
 
     if _is_json(ctx):
@@ -1019,6 +1234,7 @@ def role_create(ctx: click.Context, name: str, description: str, permissions: Op
     click.secho(f"\n  Роль '{name}' создана!", fg="green", bold=True)
     click.echo(f"  Описание: {description}")
     click.echo(f"  Права:    {len(perm_list)} разрешений")
+    click.echo(f"  Вес:      {weight}")
 
 
 @role_grp.command("edit", help="Редактировать роль.")
@@ -1028,6 +1244,7 @@ def role_create(ctx: click.Context, name: str, description: str, permissions: Op
 @click.option("--permissions", "-p", default=None, help="Полная замена прав (через запятую).")
 @click.option("--add-permissions", default=None, help="Добавить права (через запятую).")
 @click.option("--remove-permissions", default=None, help="Удалить права (через запятую).")
+@click.option("--weight", "-w", type=int, default=None, help="Новый вес/приоритет.")
 @click.pass_context
 def role_edit(
     ctx: click.Context,
@@ -1037,8 +1254,9 @@ def role_edit(
     permissions: Optional[str],
     add_permissions: Optional[str],
     remove_permissions: Optional[str],
+    weight: Optional[int],
 ) -> None:
-    """Редактировать роль: имя, описание, добавить/удалить права."""
+    """Редактировать роль: имя, описание, добавить/удалить права, вес."""
     client = _get_client(ctx)
 
     # Если нужно добавить/удалить права — сначала получаем текущие
@@ -1060,6 +1278,8 @@ def role_edit(
             body["name"] = name
         if description:
             body["description"] = description
+        if weight is not None:
+            body["weight"] = weight
 
         result = client.put(f"/api/v1/mgmt/roles/{role_name}", json_body=body)
     elif permissions:
@@ -1069,6 +1289,8 @@ def role_edit(
             body["name"] = name
         if description:
             body["description"] = description
+        if weight is not None:
+            body["weight"] = weight
         result = client.put(f"/api/v1/mgmt/roles/{role_name}", json_body=body)
     else:
         body = {}
@@ -1076,6 +1298,8 @@ def role_edit(
             body["name"] = name
         if description:
             body["description"] = description
+        if weight is not None:
+            body["weight"] = weight
         if not body:
             raise click.ClickException("Укажите хотя бы одно поле для обновления.")
         result = client.put(f"/api/v1/mgmt/roles/{role_name}", json_body=body)
@@ -1087,17 +1311,22 @@ def role_edit(
     click.secho(f"\n  Роль '{role_name}' обновлена!", fg="green", bold=True)
 
 
-@role_grp.command("delete", help="Удалить роль.")
+@role_grp.command("delete", help="Удалить роль (безвозвратно).")
 @click.argument("role_name")
 @click.option("--confirm", is_flag=True, help="Подтвердить удаление.")
 @click.pass_context
 def role_delete(ctx: click.Context, role_name: str, confirm: bool) -> None:
-    """Удалить кастомную роль (встроенные роли удалить нельзя)."""
+    """Удалить кастомную роль (встроенные роли удалить нельзя).
+
+    Безвозвратное удаление. Если роль ещё назначена активным пользователям
+    или API-ключам — сервер вернёт ошибку. Используйте `role disable`
+    для мягкого отключения.
+    """
     if role_name in ("admin", "operator", "auditor"):
         raise click.ClickException(f"Встроенную роль '{role_name}' нельзя удалить.")
 
     if not confirm:
-        click.confirm(f"Удалить роль '{role_name}'?", abort=True)
+        click.confirm(f"БЕЗВОЗВРАТНО удалить роль '{role_name}'?", abort=True)
 
     client = _get_client(ctx)
     result = client.delete(f"/api/v1/mgmt/roles/{role_name}")
@@ -1107,6 +1336,168 @@ def role_delete(ctx: click.Context, role_name: str, confirm: bool) -> None:
         return
 
     click.secho(f"\n  Роль '{role_name}' удалена!", fg="green", bold=True)
+
+
+@role_grp.command("enable", help="Включить роль.")
+@click.argument("role_name")
+@click.pass_context
+def role_enable(ctx: click.Context, role_name: str) -> None:
+    """Активировать ранее отключённую роль."""
+    client = _get_client(ctx)
+    result = client.post(f"/api/v1/mgmt/roles/{role_name}/enable")
+
+    if _is_json(ctx):
+        _out_json(result)
+        return
+
+    click.secho(f"\n  Роль '{role_name}' включена!", fg="green", bold=True)
+
+
+@role_grp.command("disable", help="Отключить роль (мягко).")
+@click.argument("role_name")
+@click.pass_context
+def role_disable(ctx: click.Context, role_name: str) -> None:
+    """Отключить роль без удаления.
+
+    Все API-ключи с этой ролью будут отклоняться при валидации.
+    Существующие JWT-сессии не затрагиваются (истекут естественным путём).
+    """
+    if role_name == "admin":
+        raise click.ClickException("Роль 'admin' нельзя отключить (заблокирует всех пользователей).")
+
+    client = _get_client(ctx)
+    result = client.post(f"/api/v1/mgmt/roles/{role_name}/disable")
+
+    if _is_json(ctx):
+        _out_json(result)
+        return
+
+    click.secho(f"\n  Роль '{role_name}' отключена!", fg="green", bold=True)
+    click.secho("  Все API-ключи с этой ролью теперь отклоняются.", fg="yellow")
+
+
+@role_grp.command("gen-key", help="Сгенерировать API-ключ для роли.")
+@click.argument("role_name")
+@click.option("--user-id", type=int, required=True, help="ID пользователя-владельца ключа.")
+@click.option("--name", "-n", default=None, help="Название ключа (по умолчанию: 'key-for-<role>').")
+@click.option("--expires-days", type=int, default=None, help="Дней до истечения.")
+@click.option("--weight", "-w", type=int, default=0, show_default=True, help="Вес/приоритет ключа.")
+@click.pass_context
+def role_gen_key(ctx: click.Context, role_name: str, user_id: int, name: Optional[str], expires_days: Optional[int], weight: int) -> None:
+    """Сгенерировать API-ключ с уже назначенной ролью.
+
+    Удобно для быстрого создания ключа под конкретную роль без явного
+    указания --role в key create.
+    """
+    client = _get_client(ctx)
+    body: Dict[str, Any] = {
+        "user_id": user_id,
+        "weight": weight,
+    }
+    if name:
+        body["name"] = name
+    if expires_days is not None:
+        body["expires_days"] = expires_days
+    result = client.post(f"/api/v1/mgmt/roles/{role_name}/gen-key", json_body=body)
+
+    if _is_json(ctx):
+        _out_json(result)
+        return
+
+    data = result.get("data", {})
+    raw_key = data.get("key", "") if isinstance(data, dict) else ""
+
+    click.secho(f"\n  API-ключ для роли '{role_name}' создан!", fg="green", bold=True)
+    click.secho("  ВНИМАНИЕ: ключ показывается только один раз!", fg="yellow", bold=True)
+    click.echo()
+    click.secho(f"  Ключ: {raw_key}", fg="cyan", bold=True)
+    click.echo(f"  Роль: {role_name}")
+    click.echo(f"  User: #{user_id}")
+    click.echo()
+    click.echo("  Использование:")
+    click.echo(f"    export SAMBA_API_KEY={raw_key}")
+    click.echo(f"    curl -H 'X-API-Key: {raw_key}' http://localhost:8099/api/v1/users/")
+    click.echo()
+
+
+@role_grp.command("users", help="Показать пользователей с указанной ролью.")
+@click.argument("role_name")
+@click.option("--include-inactive", is_flag=True, help="Включая неактивных пользователей.")
+@click.pass_context
+def role_users(ctx: click.Context, role_name: str, include_inactive: bool) -> None:
+    """Список пользователей, которым назначена указанная роль."""
+    client = _get_client(ctx)
+    result = client.get(
+        f"/api/v1/mgmt/roles/{role_name}/users",
+        params={"include_inactive": "true" if include_inactive else "false"},
+    )
+
+    if _is_json(ctx):
+        _out_json(result)
+        return
+
+    users = result.get("data", [])
+    if isinstance(users, dict) and "users" in users:
+        users = users["users"]
+
+    rows = []
+    for u in users:
+        if isinstance(u, dict):
+            rows.append([
+                str(u.get("id", "")),
+                str(u.get("username", "")),
+                str(u.get("full_name", "")),
+                str(u.get("email", "")),
+                "Да" if u.get("is_active", 1) else "Нет",
+                str(u.get("weight", 0)),
+                str(u.get("last_login_at", "") or "")[:19],
+            ])
+
+    _print_table(
+        ["ID", "Логин", "Имя", "Email", "Активен", "Вес", "Посл. вход"],
+        rows,
+        title=f"Пользователи с ролью '{role_name}'",
+    )
+
+
+@role_grp.command("keys", help="Показать API-ключи с указанной ролью.")
+@click.argument("role_name")
+@click.option("--include-inactive", is_flag=True, help="Включая неактивные ключи.")
+@click.pass_context
+def role_keys(ctx: click.Context, role_name: str, include_inactive: bool) -> None:
+    """Список API-ключей, которым назначена указанная роль."""
+    client = _get_client(ctx)
+    result = client.get(
+        f"/api/v1/mgmt/roles/{role_name}/keys",
+        params={"include_inactive": "true" if include_inactive else "false"},
+    )
+
+    if _is_json(ctx):
+        _out_json(result)
+        return
+
+    keys = result.get("data", [])
+    if isinstance(keys, dict) and "keys" in keys:
+        keys = keys["keys"]
+
+    rows = []
+    for k in keys:
+        if isinstance(k, dict):
+            rows.append([
+                str(k.get("id", "")),
+                str(k.get("name", "")),
+                str(k.get("user_id", "")),
+                "Да" if k.get("is_active", 1) else "Нет",
+                str(k.get("weight", 0)),
+                str(k.get("expires_at", "никогда"))[:19],
+                str(k.get("created_at", ""))[:19],
+            ])
+
+    _print_table(
+        ["ID", "Имя", "User ID", "Активен", "Вес", "Истекает", "Создан"],
+        rows,
+        title=f"API-ключи с ролью '{role_name}'",
+    )
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1292,6 +1683,532 @@ def audit_list(ctx: click.Context, user_id: Optional[int], action: Optional[str]
         ["ID", "User ID", "Действие", "Эндпоинт", "Время"],
         rows,
         title="Журнал аудита",
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# STATS — сводная статистика по mgmt API (v2.2)
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+@cli.command("stats", help="Сводная статистика Management API (пользователи, ключи, роли).")
+@click.pass_context
+def stats_cmd(ctx: click.Context) -> None:
+    """Показать сводную статистику: количество пользователей, ключей, ролей,
+    разбивку по ролям и т.д.
+    """
+    client = _get_client(ctx)
+    result = client.get("/api/v1/mgmt/stats")
+
+    if _is_json(ctx):
+        _out_json(result)
+        return
+
+    data = result.get("data", {})
+    if not isinstance(data, dict):
+        click.echo("(нет данных)")
+        return
+
+    click.secho("\n  Сводка Management API", fg="cyan", bold=True)
+    click.echo()
+    u = data.get("users", {})
+    k = data.get("api_keys", {})
+    r = data.get("roles", {})
+    a = data.get("audit_log", {})
+    click.echo(f"  Пользователи:  {u.get('active', 0)} активных / {u.get('total', 0)} всего")
+    click.echo(f"  API-ключи:     {k.get('active', 0)} активных / {k.get('total', 0)} всего")
+    click.echo(f"  Роли:          {r.get('active', 0)} активных / {r.get('total', 0)} всего")
+    click.echo(f"  Записей аудита: {a.get('total', 0)}")
+    click.echo()
+
+    breakdown = data.get("roles_breakdown", [])
+    if breakdown:
+        click.secho("  Разбивка по ролям:", fg="cyan", bold=True)
+        rows = []
+        for rb in breakdown:
+            if isinstance(rb, dict):
+                rows.append([
+                    str(rb.get("name", "")),
+                    "Да" if rb.get("is_active", 1) else "Нет",
+                    str(rb.get("users", 0)),
+                    str(rb.get("keys", 0)),
+                ])
+        _print_table(
+            ["Роль", "Активна", "Польз.", "Ключей"],
+            rows,
+            title=None,
+        )
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# BULK — массовые операции (v2.2)
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+@cli.group("bulk", help="Массовые операции над пользователями и ключами.")
+@click.pass_context
+def bulk_grp(ctx: click.Context) -> None:
+    """Массовые операции (enable/disable/purge для нескольких ID сразу)."""
+    pass
+
+
+@bulk_grp.command("users", help="Массовая операция над пользователями.")
+@click.option("--ids", "-i", required=True, help="Список ID через запятую (например: 1,2,5).")
+@click.option("--action", "-a", required=True, type=click.Choice(["enable", "disable", "purge"]),
+              help="Действие: enable / disable / purge.")
+@click.pass_context
+def bulk_users(ctx: click.Context, ids: str, action: str) -> None:
+    """Применить действие (enable/disable/purge) к нескольким пользователям."""
+    client = _get_client(ctx)
+    try:
+        id_list = [int(x.strip()) for x in ids.split(",") if x.strip()]
+    except ValueError:
+        raise click.ClickException("--ids должен содержать числа через запятую")
+
+    result = client.post("/api/v1/mgmt/users/bulk", json_body={"ids": id_list, "action": action})
+
+    if _is_json(ctx):
+        _out_json(result)
+        return
+
+    data = result.get("data", {})
+    ok = data.get("ok", [])
+    failed = data.get("failed", [])
+    click.secho(f"\n  Успешно: {len(ok)} пользователей", fg="green", bold=True)
+    for uid in ok:
+        click.echo(f"    + #{uid}")
+    if failed:
+        click.secho(f"  Ошибки: {len(failed)}", fg="red", bold=True)
+        for f in failed:
+            click.echo(f"    - #{f.get('id')}: {f.get('error')}")
+
+
+@bulk_grp.command("keys", help="Массовая операция над API-ключами.")
+@click.option("--ids", "-i", required=True, help="Список ID через запятую.")
+@click.option("--action", "-a", required=True, type=click.Choice(["enable", "disable", "purge"]),
+              help="Действие: enable / disable / purge.")
+@click.pass_context
+def bulk_keys(ctx: click.Context, ids: str, action: str) -> None:
+    """Применить действие (enable/disable/purge) к нескольким API-ключам."""
+    client = _get_client(ctx)
+    try:
+        id_list = [int(x.strip()) for x in ids.split(",") if x.strip()]
+    except ValueError:
+        raise click.ClickException("--ids должен содержать числа через запятую")
+
+    result = client.post("/api/v1/mgmt/keys/bulk", json_body={"ids": id_list, "action": action})
+
+    if _is_json(ctx):
+        _out_json(result)
+        return
+
+    data = result.get("data", {})
+    ok = data.get("ok", [])
+    failed = data.get("failed", [])
+    click.secho(f"\n  Успешно: {len(ok)} ключей", fg="green", bold=True)
+    for kid in ok:
+        click.echo(f"    + #{kid}")
+    if failed:
+        click.secho(f"  Ошибки: {len(failed)}", fg="red", bold=True)
+        for f in failed:
+            click.echo(f"    - #{f.get('id')}: {f.get('error')}")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 2FA — управление TOTP двухфакторной аутентификацией (v2.3)
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+@cli.group("2fa", help="Управление 2FA (TOTP) для текущего пользователя.")
+@click.pass_context
+def twofa_grp(ctx: click.Context) -> None:
+    """Управление двухфакторной аутентификацией.
+
+    \b
+    Сценарий включения:
+      1. ds_auth.py login admin PASSWORD --save
+      2. ds_auth.py 2fa setup            # получить secret + otpauth:// URI
+      3. (в Google Authenticator добавить entry по secret или QR из URI)
+      4. ds_auth.py 2fa enable --secret <SECRET> --code <123456>
+      5. ds_auth.py 2fa status           # проверить, что включено
+
+    \b
+    Логин с 2FA:
+      1. ds_auth.py login admin PASSWORD --save
+         → вернёт totp_required: true, temp_token
+      2. ds_auth.py 2fa verify --temp-token <TOKEN> --code <123456>
+         → вернёт access_token + refresh_token (сохраняются в ~/.ds_auth_token)
+    """
+    pass
+
+
+@twofa_grp.command("setup", help="Сгенерировать TOTP-секрет (показать QR URI).")
+@click.pass_context
+def twofa_setup(ctx: click.Context) -> None:
+    """Сгенерировать новый TOTP-секрет для текущего пользователя.
+
+    Секрет НЕ сохраняется — вызовите `2fa enable` с кодом из приложения,
+    чтобы подтвердить и сохранить.
+    """
+    client = _get_client(ctx)
+    result = client.post("/api/v1/auth/2fa/setup")
+
+    if _is_json(ctx):
+        _out_json(result)
+        return
+
+    data = result.get("data", {})
+    if not isinstance(data, dict):
+        click.echo("(нет данных)")
+        return
+
+    click.secho("\n  TOTP secret сгенерирован!", fg="green", bold=True)
+    click.echo()
+    click.secho(f"  Secret:       {data.get('secret', '')}", fg="cyan", bold=True)
+    click.echo()
+    click.secho("  otpauth:// URI (для QR-кода):", fg="yellow")
+    click.echo(f"  {data.get('otpauth_uri', '')}")
+    click.echo()
+    click.secho("  Как использовать:", fg="cyan")
+    click.echo("  1. Откройте Google Authenticator (или Authy/1Password)")
+    click.echo("  2. Добавьте новую запись вручную — введите secret выше")
+    click.echo("     ИЛИ отсканируйте QR-код, сгенерированный из otpauth:// URI")
+    click.echo("  3. Получите 6-значный код из приложения")
+    click.echo(f"  4. Выполните: ds_auth.py 2fa enable --secret {data.get('secret', '<SECRET>')} --code <123456>")
+    click.echo()
+
+
+@twofa_grp.command("enable", help="Включить 2FA (требует код из приложения).")
+@click.option("--secret", "-s", required=True, help="TOTP secret из `2fa setup`.")
+@click.option("--code", "-c", required=True, help="6-значный код из приложения.")
+@click.pass_context
+def twofa_enable(ctx: click.Context, secret: str, code: str) -> None:
+    """Подтвердить код и включить 2FA."""
+    client = _get_client(ctx)
+    result = client.post(
+        "/api/v1/auth/2fa/enable",
+        json_body={"secret": secret, "code": code},
+    )
+
+    if _is_json(ctx):
+        _out_json(result)
+        return
+
+    click.secho("\n  2FA включена!", fg="green", bold=True)
+    click.secho("  Теперь при логине потребуется TOTP-код из приложения.", fg="yellow")
+
+
+@twofa_grp.command("disable", help="Отключить 2FA (требует текущий пароль).")
+@click.option("--password", "-p", required=True, help="Текущий пароль пользователя.")
+@click.pass_context
+def twofa_disable(ctx: click.Context, password: str) -> None:
+    """Отключить 2FA для текущего пользователя."""
+    client = _get_client(ctx)
+    result = client.post(
+        "/api/v1/auth/2fa/disable",
+        json_body={"password": password},
+    )
+
+    if _is_json(ctx):
+        _out_json(result)
+        return
+
+    click.secho("\n  2FA отключена!", fg="green", bold=True)
+
+
+@twofa_grp.command("status", help="Проверить, включена ли 2FA.")
+@click.pass_context
+def twofa_status(ctx: click.Context) -> None:
+    """Показать статус 2FA для текущего пользователя."""
+    client = _get_client(ctx)
+    result = client.get("/api/v1/auth/2fa/status")
+
+    if _is_json(ctx):
+        _out_json(result)
+        return
+
+    data = result.get("data", {})
+    if not isinstance(data, dict):
+        click.echo("(нет данных)")
+        return
+
+    enabled = data.get("enabled", False)
+    username = data.get("username", "?")
+    if enabled:
+        click.secho(f"\n  2FA ВКЛЮЧЕНА для пользователя '{username}'", fg="green", bold=True)
+    else:
+        click.secho(f"\n  2FA отключена для пользователя '{username}'", fg="yellow")
+    click.echo()
+
+
+@twofa_grp.command("verify", help="Завершить логин с 2FA (шаг 2).")
+@click.option("--temp-token", "-t", required=True, help="temp_token из ответа /auth/login.")
+@click.option("--code", "-c", required=True, help="6-значный код из приложения.")
+@click.option("--save", is_flag=True, default=False, help="Сохранить полученный токен в ~/.ds_auth_token.")
+@click.pass_context
+def twofa_verify(ctx: click.Context, temp_token: str, code: str, save: bool) -> None:
+    """Верифицировать TOTP-код и получить полноценные JWT-токены.
+
+    После `login` (когда включена 2FA) сервер возвращает
+    `{totp_required: true, temp_token: "..."}`. Передайте temp_token
+    и код из приложения сюда, чтобы получить access_token + refresh_token.
+    """
+    client = _get_client(ctx)
+    result = client.post(
+        "/api/v1/auth/login/verify",
+        json_body={"temp_token": temp_token, "totp_code": code},
+    )
+
+    if _is_json(ctx):
+        _out_json(result)
+        return
+
+    data = result.get("data", {})
+    if not isinstance(data, dict):
+        click.secho("  Ошибка: неожиданный ответ сервера", fg="red")
+        return
+
+    access = data.get("access_token", "")
+    refresh = data.get("refresh_token", "")
+    role = data.get("role", "?")
+    perms = data.get("permissions", [])
+
+    click.secho("\n  2FA верификация успешна!", fg="green", bold=True)
+    click.echo(f"  Пользователь: {data.get('username', '?')}")
+    click.echo(f"  Роль:         {role}")
+    click.echo(f"  Права:        {len(perms)} разрешений")
+    click.echo(f"  Access token: {access[:50]}...")
+    click.echo(f"  Refresh token: {refresh[:50]}...")
+
+    if save:
+        # Build a response shape that _save_token expects
+        save_data = {
+            "access_token": access,
+            "refresh_token": refresh,
+            "expires_in": data.get("expires_in", 1800),
+            "role": role,
+            "permissions": perms,
+        }
+        _save_token(save_data)
+        click.secho("\n  Использование JWT с curl:", fg="cyan")
+        click.echo(f"    curl -H 'Authorization: Bearer {access[:30]}...' \\")
+        click.echo(f"         http://localhost:8099/api/v1/users/")
+    click.echo()
+
+
+# ── 2FA admin — управление 2FA других пользователей (v2.3.1) ────────────
+
+
+@twofa_grp.group("admin", help="Администрирование 2FA других пользователей (только admin).")
+@click.pass_context
+def twofa_admin_grp(ctx: click.Context) -> None:
+    """Управление 2FA других пользователей от имени admin.
+
+    \b
+    Требуется admin API-ключ или admin JWT.
+    Использует X-API-Key заголовок (если --api-key задан) или
+    Authorization: Bearer (если был login --save).
+
+    \b
+    Команды:
+      status <user_id>           — проверить статус 2FA пользователя
+      setup <user_id>            — сгенерировать секрет для пользователя
+      enable <user_id>           — включить 2FA (требует --secret + --code,
+                                    или --force для пропуска проверки кода)
+      disable <user_id>          — отключить 2FA (секрет сохраняется)
+      reset <user_id>            — полный сброс (секрет удаляется)
+      list-enabled               — список пользователей с включённой 2FA
+      list-disabled              — список пользователей с секретом, но 2FA выключена
+    """
+    pass
+
+
+@twofa_admin_grp.command("status", help="Статус 2FA пользователя.")
+@click.argument("user_id", type=int)
+@click.pass_context
+def twofa_admin_status(ctx: click.Context, user_id: int) -> None:
+    """Показать, включена ли 2FA у пользователя."""
+    client = _get_client(ctx)
+    result = client.get(f"/api/v1/mgmt/users/{user_id}/2fa/status")
+
+    if _is_json(ctx):
+        _out_json(result)
+        return
+
+    data = result
+    enabled = data.get("enabled", False)
+    has_secret = data.get("has_secret", False)
+    username = data.get("username", "?")
+    click.secho(f"\n  Пользователь #{user_id} ({username})", fg="cyan", bold=True)
+    click.echo(f"  2FA включена:  {'Да' if enabled else 'Нет'}")
+    click.echo(f"  Секрет в БД:   {'Да' if has_secret else 'Нет'}")
+    click.echo()
+
+
+@twofa_admin_grp.command("setup", help="Сгенерировать TOTP-секрет для пользователя.")
+@click.argument("user_id", type=int)
+@click.pass_context
+def twofa_admin_setup(ctx: click.Context, user_id: int) -> None:
+    """Сгенерировать новый TOTP-секрет для пользователя (НЕ сохраняется)."""
+    client = _get_client(ctx)
+    result = client.post(f"/api/v1/mgmt/users/{user_id}/2fa/setup")
+
+    if _is_json(ctx):
+        _out_json(result)
+        return
+
+    secret = result.get("secret", "")
+    uri = result.get("otpauth_uri", "")
+    username = result.get("username", "?")
+    click.secho(f"\n  TOTP секрет для пользователя #{user_id} ({username})", fg="green", bold=True)
+    click.echo()
+    click.secho(f"  Secret: {secret}", fg="cyan", bold=True)
+    click.echo()
+    click.secho("  otpauth:// URI (для QR):", fg="yellow")
+    click.echo(f"  {uri}")
+    click.echo()
+    click.secho("  Далее:", fg="cyan")
+    click.echo(f"  1. Передайте секрет пользователю через защищённый канал")
+    click.echo(f"  2. Пользователь вводит секрет в Google Authenticator")
+    click.echo(f"  3. Включите 2FA:")
+    click.echo(f"     ds_auth.py 2fa admin enable {user_id} --secret {secret} --code <123456>")
+    click.echo(f"  Или принудительно (без кода):")
+    click.echo(f"     ds_auth.py 2fa admin enable {user_id} --secret {secret} --force")
+    click.echo()
+
+
+@twofa_admin_grp.command("enable", help="Включить 2FA для пользователя.")
+@click.argument("user_id", type=int)
+@click.option("--secret", "-s", required=True, help="TOTP secret из `admin setup`.")
+@click.option("--code", "-c", default=None, help="6-значный код от пользователя (или --force).")
+@click.option("--force", is_flag=True, help="Принудительно — без проверки кода (RECOVERY).")
+@click.pass_context
+def twofa_admin_enable(ctx: click.Context, user_id: int, secret: str, code: Optional[str], force: bool) -> None:
+    """Включить 2FA для пользователя.
+
+    Без --force: требует --code (код из приложения пользователя).
+    С --force: сохраняет секрет без проверки — пользователь должен
+    самостоятельно добавить секрет в приложение, иначе не сможет войти.
+    """
+    if not force and not code:
+        raise click.ClickException("Требуется --code или --force")
+
+    client = _get_client(ctx)
+    body: Dict[str, Any] = {"secret": secret}
+    if code:
+        body["code"] = code
+    params = {"force": "true"} if force else {}
+    result = client.post(
+        f"/api/v1/mgmt/users/{user_id}/2fa/enable",
+        json_body=body,
+        params=params,
+    )
+
+    if _is_json(ctx):
+        _out_json(result)
+        return
+
+    click.secho(f"\n  2FA включена для пользователя #{user_id}!", fg="green", bold=True)
+    if force:
+        click.secho("  ВНИМАНИЕ: включено без проверки кода (force)!", fg="yellow", bold=True)
+        click.secho("  Пользователь ДОЛЖЕН добавить секрет в приложение, иначе не сможет войти!", fg="yellow")
+    click.echo()
+
+
+@twofa_admin_grp.command("disable", help="Отключить 2FA (секрет сохраняется).")
+@click.argument("user_id", type=int)
+@click.confirmation_option(prompt="Отключить 2FA у этого пользователя?")
+@click.pass_context
+def twofa_admin_disable(ctx: click.Context, user_id: int) -> None:
+    """Отключить 2FA (admin override, без пароля).
+
+    Секрет сохраняется в БД — можно включить обратно через `enable`.
+    Для полного удаления используйте `reset`.
+    """
+    client = _get_client(ctx)
+    result = client.post(f"/api/v1/mgmt/users/{user_id}/2fa/disable")
+
+    if _is_json(ctx):
+        _out_json(result)
+        return
+
+    click.secho(f"\n  2FA отключена для пользователя #{user_id}!", fg="green", bold=True)
+    click.secho("  Секрет сохранён — можно включить обратно.", fg="yellow")
+
+
+@twofa_admin_grp.command("reset", help="Полный сброс 2FA (секрет удаляется).")
+@click.argument("user_id", type=int)
+@click.confirmation_option(prompt="ПОЛНОСТЬЮ сбросить 2FA (удалить секрет)?")
+@click.pass_context
+def twofa_admin_reset(ctx: click.Context, user_id: int) -> None:
+    """Полный сброс 2FA — секрет удаляется из БД.
+
+    Пользователь должен будет заново настроить 2FA через `admin setup`.
+    """
+    client = _get_client(ctx)
+    result = client.post(f"/api/v1/mgmt/users/{user_id}/2fa/reset")
+
+    if _is_json(ctx):
+        _out_json(result)
+        return
+
+    click.secho(f"\n  2FA полностью сброшена для пользователя #{user_id}!", fg="red", bold=True)
+    click.secho("  Пользователь должен заново настроить 2FA.", fg="yellow")
+
+
+@twofa_admin_grp.command("list-enabled", help="Список пользователей с включённой 2FA.")
+@click.pass_context
+def twofa_admin_list_enabled(ctx: click.Context) -> None:
+    """Показать всех пользователей с включённой 2FA."""
+    client = _get_client(ctx)
+    result = client.get("/api/v1/mgmt/2fa/enabled")
+
+    if _is_json(ctx):
+        _out_json(result)
+        return
+
+    users = result.get("data", [])
+    rows = []
+    for u in users:
+        if isinstance(u, dict):
+            rows.append([
+                str(u.get("id", "")),
+                str(u.get("username", "")),
+                str(u.get("role", "")),
+                "Да" if u.get("is_active", 1) else "Нет",
+            ])
+    _print_table(
+        ["ID", "Логин", "Роль", "Активен"],
+        rows,
+        title=f"Пользователи с включённой 2FA ({len(rows)})",
+    )
+
+
+@twofa_admin_grp.command("list-disabled", help="Список пользователей с секретом, но 2FA выключена.")
+@click.pass_context
+def twofa_admin_list_disabled(ctx: click.Context) -> None:
+    """Показать пользователей с сохранённым секретом, но 2FA выключена."""
+    client = _get_client(ctx)
+    result = client.get("/api/v1/mgmt/2fa/disabled")
+
+    if _is_json(ctx):
+        _out_json(result)
+        return
+
+    users = result.get("data", [])
+    rows = []
+    for u in users:
+        if isinstance(u, dict):
+            rows.append([
+                str(u.get("id", "")),
+                str(u.get("username", "")),
+                str(u.get("role", "")),
+                "Да" if u.get("is_active", 1) else "Нет",
+            ])
+    _print_table(
+        ["ID", "Логин", "Роль", "Активен"],
+        rows,
+        title=f"Пользователи с секретом, 2FA выключена ({len(rows)})",
     )
 
 

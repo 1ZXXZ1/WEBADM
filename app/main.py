@@ -43,7 +43,7 @@ import os
 import time
 from pathlib import Path
 from contextlib import asynccontextmanager
-from typing import AsyncGenerator
+from typing import AsyncGenerator, Optional
 
 import asyncio as _asyncio
 
@@ -102,6 +102,46 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         logger.info("Management database initialized (PostgreSQL)")
     except Exception as exc:
         logger.warning("Failed to initialize management database: %s", exc)
+
+    # v1.2.7_ban: Initialize ban table schema (mgmt_bans).
+    # Safe no-op if mgmt_db pool failed to initialize — ban features
+    # will simply return 503 when called.
+    try:
+        from app.ban_db import ensure_schema
+        ensure_schema()
+        logger.info("Ban database schema verified (mgmt_bans table)")
+    except Exception as exc:
+        logger.warning("Failed to initialize ban schema: %s", exc)
+
+    # v2.3: Initialize webhooks + TOTP schemas (idempotent ALTER TABLE).
+    try:
+        from app.webhooks import ensure_schema as _ensure_webhooks_schema
+        _ensure_webhooks_schema()
+        logger.info("Webhooks schema verified (mgmt_webhooks table)")
+    except Exception as exc:
+        logger.warning("Failed to initialize webhooks schema: %s", exc)
+    try:
+        from app.totp import ensure_schema as _ensure_totp_schema
+        _ensure_totp_schema()
+        logger.info("TOTP schema verified (mgmt_users.totp_secret column)")
+    except Exception as exc:
+        logger.warning("Failed to initialize TOTP schema: %s", exc)
+
+    # v2.4: Initialize chat tables
+    try:
+        from app.chat_db import ensure_schema as _ensure_chat_schema
+        _ensure_chat_schema()
+        logger.info("Chat schema verified (chat_rooms, chat_messages, etc.)")
+    except Exception as exc:
+        logger.warning("Failed to initialize chat schema: %s", exc)
+
+    # v2.5: Initialize chat_calls table
+    try:
+        from app.chat_calls import ensure_schema as _ensure_calls_schema
+        _ensure_calls_schema()
+        logger.info("Chat calls schema verified (chat_calls table)")
+    except Exception as exc:
+        logger.warning("Failed to initialize chat calls schema: %s", exc)
 
     # v2.7: Initialize cache
     try:
@@ -186,7 +226,7 @@ def create_app() -> FastAPI:
 
     app = FastAPI(
         title="Samba AD DC Management API",
-        version="pr-a.1.2",
+        version="pr-a.1.3",
         redirect_slashes=False,
         description=(
             "REST API for administering Samba AD DC via samba-tool.\n\n"
@@ -329,6 +369,7 @@ def create_app() -> FastAPI:
         write_limit=_rate_settings.RATE_LIMIT_WRITE_PER_MIN,
         shell_projet_limit=getattr(_rate_settings, 'RATE_LIMIT_SHELL_PROJET_PER_MIN', 120),
         window_seconds=getattr(_rate_settings, 'RATE_LIMIT_WINDOW_SECONDS', 60),
+        per_user_limit=getattr(_rate_settings, 'RATE_LIMIT_PER_USER_PER_MIN', 0),
     )
 
     # ── Combined Auth middleware (API Key + JWT) ──────────────────
@@ -344,6 +385,8 @@ def create_app() -> FastAPI:
         "/api/v1/auth/login",      # v2.7: Login endpoint
         "/api/v1/auth/refresh",    # v2.7: Refresh token endpoint
         "/api/v1/auth/check",      # v3.7: Credentials check endpoint
+        "/api/v1/auth/login/verify",  # v2.3: 2FA login step 2 (temp_token + TOTP code)
+        "/api/v1/auth/test",        # v2.4.4: Credential diagnostic (always 200)
     })
 
     # v1.9.3: Auth is required ONLY for /api/ paths.
@@ -428,15 +471,81 @@ def create_app() -> FastAPI:
                     request.state.user = payload
                     request.state.auth_method = "jwt"
                     request.state.role = jwt_role
-                    return await call_next(request)
+
+                    # v1.2.7_ban: Check if the JWT user is currently banned.
+                    # Skip the check for admin role (admin cannot be banned
+                    # by another admin in current implementation — but we
+                    # still allow the check to run in case an admin was
+                    # banned directly in DB).
+                    jwt_username = payload.get("username") or payload.get("sub") or ""
+                    if jwt_username:
+                        try:
+                            from app.ban_db import is_user_banned
+                            ban_record = is_user_banned(jwt_username)
+                            if ban_record:
+                                return JSONResponse(
+                                    status_code=403,
+                                    content=ErrorResponse(
+                                        status="error",
+                                        message=(
+                                            f"User '{jwt_username}' is banned"
+                                            + (f": {ban_record.get('reason')}" if ban_record.get('reason') else "")
+                                            + (f" (expires: {ban_record.get('expires_at')})" if ban_record.get('expires_at') else " (permanent)")
+                                        ),
+                                    ).model_dump(),
+                                )
+                        except Exception as ban_exc:
+                            logger.debug("Ban check failed (non-fatal): %s", ban_exc)
+
+                    # v2.3.4: Audit log for JWT-authenticated requests.
+                    # Previously this path did `return await call_next(request)`
+                    # which SKIPPED the audit log code at the bottom (that code
+                    # was only reached by the API-key path). Now we inline the
+                    # same audit logic here so JWT requests are logged too.
+                    import time as _jwt_audit_time
+                    _jwt_audit_start = _jwt_audit_time.monotonic()
+                    _jwt_response = await call_next(request)
+                    _jwt_audit_duration_ms = int((_jwt_audit_time.monotonic() - _jwt_audit_start) * 1000)
+
+                    try:
+                        from app.api_ma import log_action, get_user_by_username
+                        _jwt_username = jwt_username or payload.get("sub") or payload.get("username") or ""
+                        _jwt_user_id = None
+                        if _jwt_username:
+                            try:
+                                _jwt_u = get_user_by_username(_jwt_username)
+                                if _jwt_u:
+                                    _jwt_user_id = _jwt_u["id"]
+                            except Exception:
+                                pass
+
+                        log_action(
+                            user_id=_jwt_user_id,
+                            api_key_id=None,
+                            action=f"{request.method} {path}",
+                            endpoint=path,
+                            ip_address=request.client.host if request.client else "",
+                            username=_jwt_username,
+                            method=request.method,
+                            status_code=_jwt_response.status_code,
+                            duration_ms=_jwt_audit_duration_ms,
+                            user_agent=request.headers.get("user-agent", ""),
+                            request_body=None,
+                            auth_method="jwt",
+                        )
+                    except Exception:
+                        pass  # Audit logging is best-effort
+
+                    return _jwt_response
             except Exception as exc:
                 logger.debug("JWT validation failed: %s", exc)
                 return JSONResponse(
                     status_code=401,
-                    content=ErrorResponse(
-                        status="error",
-                        message=f"Invalid or expired JWT token: {exc}",
-                    ).model_dump(),
+                    content={"detail": {
+                        "status": "error",
+                        "message": "Invalid or expired JWT token. Please login again.",
+                        "code": "INVALID_JWT",
+                    }},
                 )
 
         # Try API key
@@ -450,7 +559,51 @@ def create_app() -> FastAPI:
             try:
                 from app.api_ma import validate_api_key
                 result = validate_api_key(api_key)
-                if result:
+                # v2.4.2: Check for disabled-account/role/expiry markers
+                if result and result.get("_auth_status"):
+                    _status = result["_auth_status"]
+                    _uname = result.get("username", "")
+                    if _status == "user_disabled":
+                        return JSONResponse(
+                            status_code=403,
+                            content={"detail": {
+                                "status": "error",
+                                "message": f"Account '{_uname}' is disabled. Contact your administrator to re-enable it.",
+                                "code": "ACCOUNT_DISABLED",
+                                "username": _uname,
+                            }},
+                        )
+                    elif _status == "key_disabled":
+                        return JSONResponse(
+                            status_code=403,
+                            content={"detail": {
+                                "status": "error",
+                                "message": f"This API key is deactivated. Contact your administrator to re-enable it.",
+                                "code": "KEY_DISABLED",
+                                "username": _uname,
+                            }},
+                        )
+                    elif _status == "role_disabled":
+                        _rn = result.get("role", "")
+                        return JSONResponse(
+                            status_code=403,
+                            content={"detail": {
+                                "status": "error",
+                                "message": f"Role '{_rn}' is disabled. All API keys with this role are rejected. Contact your administrator.",
+                                "code": "ROLE_DISABLED",
+                                "role": _rn,
+                            }},
+                        )
+                    elif _status == "key_expired":
+                        return JSONResponse(
+                            status_code=401,
+                            content={"detail": {
+                                "status": "error",
+                                "message": "This API key has expired. Contact your administrator to rotate it.",
+                                "code": "KEY_EXPIRED",
+                            }},
+                        )
+                if result and not result.get("_auth_status"):
                     validated = True
                     role = result.get("role", "operator")
                     request.state.api_key_info = result
@@ -486,36 +639,162 @@ def create_app() -> FastAPI:
                             message=f"Role '{role}' does not have permission for {request.method} {path}{perm_msg}",
                         ).model_dump(),
                     )
+
+                # v1.2.7_ban: Check if the API key (or its owning user)
+                # is currently banned. We check both:
+                #   1. The key itself (by key_prefix)
+                #   2. The owning user (by username, if available)
+                # Static API key (settings.API_KEY) cannot be banned — it
+                # is the bootstrap admin key.
+                if request.state.auth_method == "api_key":
+                    try:
+                        from app.ban_db import is_key_banned, is_user_banned
+                        key_info = getattr(request.state, "api_key_info", {}) or {}
+                        key_prefix = key_info.get("key_prefix") or ""
+                        owner_username = key_info.get("username") or key_info.get("name") or ""
+
+                        # Check key ban first
+                        if key_prefix:
+                            ban_rec = is_key_banned(key_prefix)
+                            if ban_rec:
+                                return JSONResponse(
+                                    status_code=403,
+                                    content=ErrorResponse(
+                                        status="error",
+                                        message=(
+                                            f"API key '{key_prefix}…' is banned"
+                                            + (f": {ban_rec.get('reason')}" if ban_rec.get('reason') else "")
+                                            + (f" (expires: {ban_rec.get('expires_at')})" if ban_rec.get('expires_at') else " (permanent)")
+                                        ),
+                                    ).model_dump(),
+                                )
+                        # Then check owning user ban
+                        if owner_username:
+                            ban_rec = is_user_banned(owner_username)
+                            if ban_rec:
+                                return JSONResponse(
+                                    status_code=403,
+                                    content=ErrorResponse(
+                                        status="error",
+                                        message=(
+                                            f"User '{owner_username}' (owner of this API key) is banned"
+                                            + (f": {ban_rec.get('reason')}" if ban_rec.get('reason') else "")
+                                            + (f" (expires: {ban_rec.get('expires_at')})" if ban_rec.get('expires_at') else " (permanent)")
+                                        ),
+                                    ).model_dump(),
+                                )
+                    except Exception as ban_exc:
+                        logger.debug("Ban check failed (non-fatal): %s", ban_exc)
+
                 # Audit log the authenticated action
+                # v2.3.2: Rich audit log with HTTP context + semantic events
+                import time as _time
+                _audit_start = _time.monotonic()
+                response = await call_next(request)
+                _audit_duration_ms = int((_time.monotonic() - _audit_start) * 1000)
+
                 try:
                     from app.api_ma import log_action
-                    key_info = getattr(request.state, 'api_key_info', None)
+                    auth_method = getattr(request.state, "auth_method", None)
+                    username = None
+                    user_id = None
+                    api_key_id = None
+
+                    if auth_method == "jwt":
+                        payload = getattr(request.state, "user", {}) or {}
+                        username = payload.get("sub") or payload.get("username")
+                        # Resolve user_id from DB by username (best-effort)
+                        if username:
+                            try:
+                                from app.api_ma import get_user_by_username
+                                u = get_user_by_username(username)
+                                if u:
+                                    user_id = u["id"]
+                            except Exception:
+                                pass
+                    elif auth_method in ("api_key", "static_api_key"):
+                        key_info = getattr(request.state, "api_key_info", None) or {}
+                        user_id = key_info.get("user_id")
+                        api_key_id = key_info.get("key_id")
+                        username = key_info.get("username")
+                        # v2.3.3: Static API key has no DB-backed user — give it
+                        # a recognisable pseudo-username so audit log rows aren't
+                        # completely empty. This makes it easy to filter requests
+                        # made with the bootstrap admin key.
+                        if auth_method == "static_api_key" and not username:
+                            username = "(static-admin)"
+                            # user_id stays None — static key has no DB user.
+                            # If a get_user_by_username("(static-admin)") ever
+                            # succeeds (it shouldn't), we'd assign that ID;
+                            # otherwise leave null.
+
+                    # Capture request body snippet (best-effort, ≤512 chars)
+                    # — only for write methods (POST/PUT/PATCH/DELETE)
+                    body_snippet = None
+                    # NOTE: FastAPI consumes the body before this middleware runs,
+                    # so we can't read it here without extra plumbing. Leaving as
+                    # None — semantic events from individual routers can supply
+                    # richer details via log_semantic().
+
+                    # v2.3.3: Build a human-readable details string for non-JWT
+                    # auth so the audit log row is self-describing even when
+                    # user_id is null (static API key path).
+                    details_str = None
+                    if auth_method == "static_api_key":
+                        details_str = "Request made with static bootstrap API key"
+
                     log_action(
-                        user_id=key_info.get('user_id') if key_info else None,
-                        api_key_id=key_info.get('key_id') if key_info else None,
+                        user_id=user_id,
+                        api_key_id=api_key_id,
                         action=f"{request.method} {path}",
                         endpoint=path,
                         ip_address=request.client.host if request.client else "",
+                        username=username,
+                        method=request.method,
+                        status_code=response.status_code,
+                        duration_ms=_audit_duration_ms,
+                        user_agent=request.headers.get("user-agent", ""),
+                        request_body=body_snippet,
+                        auth_method=auth_method,
+                        details=details_str,
                     )
+
+                    # v2.3.2: Emit webhook for failed login attempts
+                    if (path == "/api/v1/auth/login"
+                            and response.status_code == 401
+                            and username is None):
+                        # body may contain the username — but we can't read
+                        # it here. Just emit a generic auth.login_failure.
+                        try:
+                            from app.webhooks import emit_auth_event
+                            emit_auth_event(
+                                "login_failure",
+                                username="(unknown)",
+                                ip=request.client.host if request.client else "",
+                            )
+                        except Exception:
+                            pass
                 except Exception:
                     pass  # Audit logging is best-effort
-                return await call_next(request)
+                return response
 
             return JSONResponse(
                 status_code=401,
-                content=ErrorResponse(
-                    status="error",
-                    message="Invalid API key",
-                ).model_dump(),
+                content={"detail": {
+                    "status": "error",
+                    "message": "Invalid API key",
+                    "code": "INVALID_API_KEY",
+                }},
             )
 
         # No authentication provided
         return JSONResponse(
             status_code=401,
-            content=ErrorResponse(
-                status="error",
-                message="Missing authentication. Provide X-API-Key header or Authorization: Bearer token",
-            ).model_dump(),
+            content={"detail": {
+                "status": "error",
+                "message": "Missing authentication. Provide X-API-Key header or Authorization: Bearer token",
+                "code": "AUTH_REQUIRED",
+            }},
         )
 
     # ── v2.7: Cache invalidation middleware ─────────────────────────
@@ -639,7 +918,7 @@ def create_app() -> FastAPI:
             "status": "ok",
             "service": "samba-api-server",
             "server_role": role,
-            "version": "pr-a.1.2",
+            "version": "pr-a.1.3",
         }
 
     # v2.7: Detailed health check
@@ -676,15 +955,108 @@ def create_app() -> FastAPI:
     from app.auth_jwt import authenticate_login, create_access_token, create_refresh_token, decode_token
 
     @app.post("/api/v1/auth/login", response_model=TokenResponse, tags=["Authentication"])
-    async def login(body: LoginRequest):
-        """Authenticate with username/password and get JWT tokens."""
+    async def login(body: LoginRequest, request: Request):
+        """Authenticate with username/password and get JWT tokens.
+
+        v2.3: If 2FA is enabled for the user, returns
+        ``{totp_required: true, temp_token: "..."}`` instead of full
+        tokens. The caller must then POST ``/api/v1/auth/login/verify``
+        with the temp_token and a 6-digit TOTP code to obtain the
+        full token pair.
+
+        v2.3.2: Audit log enriched — captures username, IP, user-agent,
+        success/failure status, duration.
+        """
+        import time as _time
+        from fastapi.responses import JSONResponse as _JSONResp
+        _login_start = _time.monotonic()
+
+        def _audit_login(status_code: int, user_id: Optional[int], username_str: str):
+            """Best-effort audit log for the login attempt."""
+            try:
+                from app.api_ma import log_action
+                log_action(
+                    user_id=user_id,
+                    api_key_id=None,
+                    action="POST /api/v1/auth/login",
+                    endpoint="/api/v1/auth/login",
+                    ip_address=request.client.host if request.client else "",
+                    username=username_str or body.username,
+                    method="POST",
+                    status_code=status_code,
+                    duration_ms=int((_time.monotonic() - _login_start) * 1000),
+                    user_agent=request.headers.get("user-agent", ""),
+                    request_body=None,  # don't log password
+                    auth_method="credentials",
+                    event_type="auth.login_success" if status_code == 200 else "auth.login_failure",
+                )
+            except Exception:
+                pass
+
         from app.api_ma import authenticate_user
         user = authenticate_user(body.username, body.password)
         if not user:
+            _audit_login(401, None, body.username)
+            # v2.3.2: Emit webhook for failed login
+            try:
+                from app.webhooks import emit_auth_event
+                emit_auth_event(
+                    "login_failure",
+                    username=body.username,
+                    ip=request.client.host if request.client else "",
+                )
+            except Exception:
+                pass
             raise HTTPException(
                 status_code=401,
                 detail={"status": "error", "message": "Invalid username or password"},
             )
+
+        # v2.4.1: Check if account is disabled — give clear message
+        if user.get("_auth_status") == "disabled":
+            _audit_login(403, user.get("id"), body.username)
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "status": "error",
+                    "message": f"Account '{body.username}' is disabled. Contact your administrator to re-enable it.",
+                    "code": "ACCOUNT_DISABLED",
+                    "username": body.username,
+                },
+            )
+
+        # v2.3: 2FA check — if enabled, return temp_token instead of full tokens
+        try:
+            from app.totp import is_enabled_for_user
+            if is_enabled_for_user(user["id"]):
+                from app.routers.twofa import _issue_temp_token
+                temp_token = _issue_temp_token(user["id"], body.username)
+                _audit_login(200, user["id"], body.username)
+                # v2.3.2: Emit webhook for successful login (with 2FA pending)
+                try:
+                    from app.webhooks import emit_auth_event
+                    emit_auth_event(
+                        "login_success",
+                        username=body.username,
+                        ip=request.client.host if request.client else "",
+                        user_id=user["id"],
+                    )
+                except Exception:
+                    pass
+                return _JSONResp(
+                    status_code=200,
+                    content={
+                        "status": "ok",
+                        "totp_required": True,
+                        "temp_token": temp_token,
+                        "expires_in": 300,  # 5 minutes
+                        "username": body.username,
+                        "next_step": "POST /api/v1/auth/login/verify with {temp_token, totp_code}",
+                    },
+                )
+        except Exception as exc:
+            logger.debug("2FA check failed (non-fatal, skipping): %s", exc)
+
         token_data = {"sub": user["username"], "role": user["role"]}
         # v2.8: Include permissions in the token
         try:
@@ -695,6 +1067,18 @@ def create_app() -> FastAPI:
             perms = []
         access_token = create_access_token(token_data)
         refresh_token = create_refresh_token(token_data)
+        _audit_login(200, user["id"], body.username)
+        # v2.3.2: Emit webhook for successful login
+        try:
+            from app.webhooks import emit_auth_event
+            emit_auth_event(
+                "login_success",
+                username=body.username,
+                ip=request.client.host if request.client else "",
+                user_id=user["id"],
+            )
+        except Exception:
+            pass
         return TokenResponse(
             access_token=access_token,
             refresh_token=refresh_token,
@@ -957,6 +1341,206 @@ def create_app() -> FastAPI:
             },
         )
 
+    # ── /auth/test — FULL diagnostic (GET) — shows WHY auth succeeds/fails ─
+    # v2.4.4: Returns the complete status of the provided credentials —
+    # valid/invalid, user active/disabled, key active/disabled/expired,
+    # role active/disabled, permissions. Always returns 200 (it's a
+    # diagnostic endpoint, not a gatekeeper).
+    @app.get("/api/v1/auth/test", tags=["Authentication"])
+    async def test_credentials(request: Request):
+        """Full credential diagnostic.
+
+        Send ``X-API-Key`` or ``Authorization: Bearer`` — get back the
+        complete status: is the key valid? is the user active? is the
+        role active? what permissions? what expiry?
+
+        Always returns HTTP 200 — this is a diagnostic endpoint, not
+        a gatekeeper. The ``valid`` field tells you if the credentials
+        would be accepted by the auth middleware.
+
+        Examples::
+
+            # Test an API key
+            curl -s /api/v1/auth/test -H "X-API-Key: WEBADC-XXXXX-XXXXX-XXXXX"
+
+            # Test a JWT
+            curl -s /api/v1/auth/test -H "Authorization: Bearer eyJ..."
+        """
+        from app.config import get_settings
+        settings = get_settings()
+        result: Dict[str, Any] = {
+            "valid": False,
+            "auth_method": None,
+            "message": "",
+            "code": "",
+        }
+
+        # ── Try X-API-Key ────────────────────────────────────────────
+        api_key = request.headers.get("X-API-Key")
+        if api_key:
+            result["auth_method"] = "api_key"
+            result["key_provided"] = True
+
+            # Check management DB
+            try:
+                from app.api_ma import validate_api_key
+                vr = validate_api_key(api_key)
+
+                if vr is None:
+                    result["message"] = "Invalid API key — key not found, hash mismatch, or key deactivated with no owning user"
+                    result["code"] = "INVALID_API_KEY"
+                    return result
+
+                if vr.get("_auth_status"):
+                    _st = vr["_auth_status"]
+                    _uname = vr.get("username", "")
+                    if _st == "user_disabled":
+                        result["message"] = f"Account '{_uname}' is disabled. The API key is valid but the owning user account has been deactivated."
+                        result["code"] = "ACCOUNT_DISABLED"
+                        result["username"] = _uname
+                        result["user_id"] = vr.get("user_id")
+                        result["key_id"] = vr.get("key_id")
+                    elif _st == "key_disabled":
+                        result["message"] = f"This API key is deactivated (but user '{_uname}' is still active)."
+                        result["code"] = "KEY_DISABLED"
+                        result["username"] = _uname
+                        result["user_id"] = vr.get("user_id")
+                        result["key_id"] = vr.get("key_id")
+                    elif _st == "role_disabled":
+                        result["message"] = f"Role '{vr.get('role','')}' is disabled. All API keys with this role are rejected."
+                        result["code"] = "ROLE_DISABLED"
+                        result["username"] = _uname
+                        result["role"] = vr.get("role")
+                    elif _st == "key_expired":
+                        result["message"] = f"This API key has expired (expired at: {vr.get('expires_at','?')})."
+                        result["code"] = "KEY_EXPIRED"
+                        result["expires_at"] = vr.get("expires_at")
+                    return result
+
+                # Fully valid
+                result["valid"] = True
+                result["message"] = "API key is valid"
+                result["username"] = vr.get("username", "")
+                result["user_id"] = vr.get("user_id")
+                result["key_id"] = vr.get("key_id")
+                result["role"] = vr.get("role", "")
+                result["key_prefix"] = vr.get("key_prefix", "")
+                result["expires_at"] = vr.get("expires_at")
+                result["permissions"] = vr.get("permissions", [])
+                return result
+
+            except Exception as exc:
+                # api_ma not available — try static key
+                pass
+
+            # Fallback: static API key from .env
+            import secrets as _secrets
+            if _secrets.compare_digest(api_key, settings.API_KEY):
+                result["valid"] = True
+                result["auth_method"] = "static_api_key"
+                result["message"] = "Static bootstrap API key (from .env SAMBA_API_KEY) is valid"
+                result["username"] = "(static-admin)"
+                result["role"] = "admin"
+                try:
+                    from app.api_ma import get_role_permissions
+                    result["permissions"] = sorted(get_role_permissions("admin"))
+                except Exception:
+                    result["permissions"] = []
+                return result
+
+            result["message"] = "Invalid API key"
+            result["code"] = "INVALID_API_KEY"
+            return result
+
+        # ── Try JWT Bearer ───────────────────────────────────────────
+        auth_header = request.headers.get("Authorization", "")
+        if auth_header.startswith("Bearer "):
+            token = auth_header[7:]
+            result["auth_method"] = "jwt"
+            result["token_provided"] = True
+
+            try:
+                from app.auth_jwt import decode_token
+                payload = decode_token(token)
+                if payload and payload.get("type") == "access":
+                    jwt_role = payload.get("role", "unknown")
+                    jwt_username = payload.get("sub", "")
+
+                    # Check if user is still active
+                    user_active = True
+                    user_id = None
+                    if jwt_username:
+                        try:
+                            from app.api_ma import get_user_by_username
+                            u = get_user_by_username(jwt_username)
+                            if u:
+                                user_id = u["id"]
+                                user_active = bool(u.get("is_active", 1))
+                        except Exception:
+                            pass
+
+                    if not user_active:
+                        result["message"] = f"Account '{jwt_username}' is disabled. The JWT token is technically valid, but the account has been deactivated."
+                        result["code"] = "ACCOUNT_DISABLED"
+                        result["username"] = jwt_username
+                        result["user_id"] = user_id
+                        result["role"] = jwt_role
+                        return result
+
+                    # Check if role is still active
+                    try:
+                        from app.api_ma import get_role
+                        role_info = get_role(jwt_role)
+                        if role_info and not role_info.get("is_active", 1):
+                            result["message"] = f"Role '{jwt_role}' is disabled. The JWT is valid but the role has been deactivated."
+                            result["code"] = "ROLE_DISABLED"
+                            result["username"] = jwt_username
+                            result["role"] = jwt_role
+                            return result
+                    except Exception:
+                        pass
+
+                    # Fully valid
+                    result["valid"] = True
+                    result["message"] = "JWT token is valid"
+                    result["username"] = jwt_username
+                    result["user_id"] = user_id
+                    result["role"] = jwt_role
+                    result["permissions"] = payload.get("permissions", [])
+
+                    # Fresh permissions from DB
+                    try:
+                        from app.api_ma import get_role_permissions
+                        fresh = sorted(get_role_permissions(jwt_role))
+                        if fresh:
+                            result["permissions"] = fresh
+                    except Exception:
+                        pass
+
+                    # Expiry
+                    try:
+                        exp_ts = payload.get("exp")
+                        if exp_ts:
+                            from datetime import datetime, timezone
+                            result["expires_at"] = datetime.fromtimestamp(exp_ts, tz=timezone.utc).isoformat()
+                    except Exception:
+                        pass
+
+                    return result
+                else:
+                    result["message"] = "JWT token is not an access token (wrong type)"
+                    result["code"] = "INVALID_JWT_TYPE"
+                    return result
+            except Exception as exc:
+                result["message"] = f"Invalid or expired JWT token: {exc}"
+                result["code"] = "INVALID_JWT"
+                return result
+
+        # ── No credentials provided ──────────────────────────────────
+        result["message"] = "No credentials provided. Send X-API-Key header or Authorization: Bearer token."
+        result["code"] = "AUTH_REQUIRED"
+        return result
+
     # ── Routers ────────────────────────────────────────────────────
     from app.routers import (
         user,
@@ -984,6 +1568,21 @@ def create_app() -> FastAPI:
         ai,                # v1.6.8-1: AI Assistant router (Polza.ai + Task Builder)
         sdb,               # v2.0: SDB — Samba Database Query Tool (direct LDB access, SQL-like, export)
         report,            # v1.9-3-4: Report — Multi-sheet AD report generation (XLSX, 8 sheets)
+        cfg,               # v2.1: CFG — Runtime .env configuration management (hot-reload, no reboot)
+        ban,               # v1.2.7_ban: Ban / Unban router (users + API keys)
+        # v2.3 new routers
+        webhooks,          # v2.3: Webhook registration + dispatch
+        backup,            # v2.3: Backup / Restore (sam.ldb + mgmt DB)
+        bulk_users,        # v2.3: Bulk operations on AD users
+        shell_projet_files,  # v2.3: File manager for shell-project workspaces
+        audit_export,      # v2.3: Audit log CSV/XLSX/JSON export
+        dashboard_charts,  # v2.3: Aggregated data for dashboard charts
+        live,              # v2.3: SSE live events stream
+        twofa,             # v2.3: 2FA / TOTP setup + verify
+        shell_ws,          # v2.3: WebSocket real-time shell execution
+        twofa_admin,       # v2.3.1: Admin endpoints for managing 2FA on other users
+        chat,              # v2.4: Chat REST API
+        chat_ws,           # v2.4: Chat WebSocket
     )
 
     api_prefix = "/api/v1"
@@ -1012,6 +1611,25 @@ def create_app() -> FastAPI:
     app.include_router(ai.router, prefix=api_prefix)               # v1.6.8-1
     app.include_router(sdb.router, prefix=api_prefix)               # v2.0: SDB
     app.include_router(report.router, prefix=api_prefix)             # v1.9-3-4: Report
+    app.include_router(cfg.router, prefix=api_prefix)                # v2.1: CFG — Runtime .env management
+    app.include_router(ban.router, prefix=api_prefix)                # v1.2.7_ban: Ban / Unban
+
+    # ── v2.3 new routers ─────────────────────────────────────────────
+    # Note: most of these have their own /api/v1 prefix baked in,
+    # so we don't pass prefix here.
+    app.include_router(webhooks.router)            # /api/v1/webhooks
+    app.include_router(backup.router)              # /api/v1/backup
+    app.include_router(bulk_users.router)          # /api/v1/users/bulk
+    app.include_router(shell_projet_files.router)  # /api/v1/shell/projet/{id}/files/*
+    app.include_router(audit_export.router)        # /api/v1/mgmt/audit/export
+    app.include_router(dashboard_charts.router)    # /api/v1/dashboard/charts/*
+    app.include_router(live.router)                # /api/v1/live/events
+    app.include_router(twofa.router)               # /api/v1/auth/2fa/* (requires auth)
+    app.include_router(twofa.public_router)        # /api/v1/auth/login/verify (PUBLIC)
+    app.include_router(twofa_admin.router)         # /api/v1/mgmt/users/{id}/2fa/* (admin only)
+    app.include_router(shell_ws.router)            # /ws/shell (WebSocket, no prefix)
+    app.include_router(chat.router)                # /api/v1/chat/* (REST)
+    app.include_router(chat_ws.router)             # /ws/chat/{room_id} (WebSocket)
 
     # ── Web Panel (SPA at /) ──────────────────────────────────────────
     # Include the web router (provides /web/api/health endpoint).
@@ -1201,6 +1819,13 @@ def create_app() -> FastAPI:
             logger.warning("WebSocket error on global projet channel: %s", exc)
         finally:
             await pws_mgr.disconnect(websocket, projet_id=None)
+
+    # v2.3: WebSocket /ws/live for live dashboard updates
+    @app.websocket("/ws/live")
+    async def ws_live(websocket: WebSocket):
+        """WebSocket for real-time dashboard updates (user/key/role events)."""
+        from app.routers.live import ws_live_endpoint
+        await ws_live_endpoint(websocket)
 
     # ── Mount WebADC as sub-app (both API + Web on same port 8099) ───────
     # v1.9.3: WebADC panel mounted at /web/ — serves the SPA + API proxy.

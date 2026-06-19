@@ -7,7 +7,7 @@ import io
 import os
 from typing import List, Optional
 
-from sdb.parser.ldif import LdifRecord
+from app.sdb_lib.parser.ldif import LdifRecord
 
 
 class CsvFormatter:

@@ -31,6 +31,11 @@ SQL-like SELECT:
   SELECT sAMAccountName, cn, mail FROM USERS;
   SELECT * FROM GROUPS WHERE cn=*Admin*;
   SELECT sAMAccountName FROM COMPUTERS;
+
+FULL - вывод с нумерацией колонок (для web API):
+  FULL                 = все записи, колонки пронумерованы
+  FULL 1               = нумерация с 1 для каждой записи
+  FULL; OUTPUT f.json  = записать результат в JSON
 """
 
 import os
@@ -41,10 +46,10 @@ import logging
 import struct
 from typing import List, Optional, Any, Dict
 
-from sdb.parser.script import ScriptParser, ScriptCommand, CommandType
-from sdb.parser.ldif import LdifRecord
-from sdb.formatters import get_formatter
-from sdb.config import SAMBA_TOOL_HELP, SQL_TABLES
+from app.sdb_lib.parser.script import ScriptParser, ScriptCommand, CommandType
+from app.sdb_lib.parser.ldif import LdifRecord
+from app.sdb_lib.formatters import get_formatter
+from app.sdb_lib.config import SAMBA_TOOL_HELP, SQL_TABLES
 
 logger = logging.getLogger(__name__)
 
@@ -192,6 +197,7 @@ class ScriptEngine:
         # Состояние
         self.current_database = "sam"
         self.current_format = "table"
+        self._format_explicitly_set = False  # Был ли FORMAT явно установлен пользователем
         self.current_output: Optional[str] = None
         self.current_fields: Optional[List[str]] = None
         self.current_limit: int = 0
@@ -199,6 +205,10 @@ class ScriptEngine:
         self.last_records: List[LdifRecord] = []
         self.last_result: Any = None
         self.last_dataframe = None
+        # v2: pending FROM scope/filter (set by `FROM <table> [WHERE ...]`)
+        # Cleared after every SHOW AS / SELECT execution.
+        self.pending_from_scope: Optional[str] = None
+        self.pending_from_filter: str = ""
 
     def execute(self, script_text: str) -> Any:
         commands = self.parser.parse(script_text)
@@ -220,6 +230,8 @@ class ScriptEngine:
             return self._cmd_use(cmd)
         if cmd.cmd_type == CommandType.SELECT:
             return self._cmd_select(cmd)
+        if cmd.cmd_type == CommandType.FROM:
+            return self._cmd_from(cmd)
         if cmd.cmd_type == CommandType.WHERE:
             return self._cmd_where(cmd)
         if cmd.cmd_type == CommandType.FORMAT:
@@ -254,6 +266,8 @@ class ScriptEngine:
             return self._cmd_list(cmd)
         if cmd.cmd_type == CommandType.SYNTHESIS:
             return self._cmd_synthesis(cmd)
+        if cmd.cmd_type == CommandType.FULL:
+            return self._cmd_full(cmd)
         return None
 
     # ─── Реализации команд ─────────────────────────────────────────────────
@@ -262,7 +276,7 @@ class ScriptEngine:
         """USE <database> - переключить базу данных."""
         db_name = self._substitute_vars(cmd.args[0])
         db_name_lower = db_name.lower()
-        from sdb.config import LDB_DATABASES
+        from app.sdb_lib.config import LDB_DATABASES
         for key in LDB_DATABASES:
             if key.lower() == db_name_lower:
                 db_name = key
@@ -369,6 +383,73 @@ class ScriptEngine:
         self.last_result = records
         return records
 
+    def _cmd_from(self, cmd: ScriptCommand) -> Any:
+        """FROM <table> [WHERE <filter>]  — shorthand that defers execution.
+
+        v2: the frontend SDB AI prompt uses this style:
+            USE sam;
+            FROM USERS WHERE adminCount = 1;
+            SHOW AS json LIMIT 100;
+
+        This command only stores the scope + filter on the engine and
+        returns ``None``. The actual LDB query is triggered by the next
+        ``SHOW AS <fmt> [LIMIT <N>]`` (or by an explicit ``SELECT``).
+
+        The pending values are cleared after the next SHOW/SELECT so a
+        subsequent ``SHOW AS json`` without a new ``FROM`` re-emits the
+        last result instead of silently re-running the same query.
+        """
+        if not cmd.args:
+            print("Использование: FROM <table> [WHERE <filter>]")
+            return None
+        scope = cmd.args[0]
+        filter_str = cmd.kwargs.get("filter", "")
+        scope = self._substitute_vars(scope)
+        filter_str = self._substitute_vars(filter_str)
+        self.pending_from_scope = scope
+        self.pending_from_filter = filter_str
+        # Don't print anything — the actual query result will be printed
+        # by the following SHOW AS / FORMAT command.
+        return None
+
+    def _execute_pending_from(self, limit_override: int = 0) -> List[LdifRecord]:
+        """Run the deferred ``FROM <table> [WHERE <filter>]`` query.
+
+        Translates the pending scope + filter into a synthetic SELECT
+        command and dispatches it through ``_cmd_select`` so that all
+        existing SQL-like / LDAP-filter logic is reused.
+
+        Parameters
+        ----------
+        limit_override : int
+            If >0, temporarily swap ``self.current_limit`` for this
+            single call. Used by ``SHOW AS json LIMIT 5`` so the LIMIT
+            applies only to this one output and not to subsequent ones.
+        """
+        scope = self.pending_from_scope or "*"
+        filter_str = self.pending_from_filter
+
+        synthetic = ScriptCommand(
+            cmd_type=CommandType.SELECT,
+            args=["*"],
+            kwargs={"scope": scope, "filter": filter_str},
+            raw=f"FROM {scope}{' WHERE ' + filter_str if filter_str else ''}",
+            line_num=0,
+        )
+
+        saved_limit = self.current_limit
+        if limit_override > 0:
+            self.current_limit = limit_override
+        try:
+            records = self._cmd_select(synthetic)
+        finally:
+            self.current_limit = saved_limit
+
+        # Clear pending — the FROM was consumed.
+        self.pending_from_scope = None
+        self.pending_from_filter = ""
+        return records or []
+
     def _cmd_where(self, cmd: ScriptCommand) -> List[LdifRecord]:
         """WHERE <filter> - фильтр для последних записей."""
         filter_expr = self._substitute_vars(cmd.args[0])
@@ -394,6 +475,7 @@ class ScriptEngine:
         """FORMAT <format> - установить формат вывода."""
         fmt = cmd.args[0].lower()
         self.current_format = fmt
+        self._format_explicitly_set = True  # Пользователь явно установил формат
         print(f"Формат вывода: {fmt}")
         self.last_result = fmt
         return fmt
@@ -513,12 +595,50 @@ class ScriptEngine:
           SHOW GROUP Domain Admins        → ищет sAMAccountName="Domain Admins"
           SHOW GPO "Default Domain"       → ищет displayName содержащее "Default Domain"
           SHOW OU "Domain Controllers"    → ищет ou="Domain Controllers"
+
+        v2: дополнительно поддерживается синтаксис
+          SHOW AS <format> [LIMIT <N>]
+        используемый фронтенд-генератором SDB AI. Если перед этим была
+        команда ``FROM <table>``, она выполняется; иначе повторно
+        выводятся ``last_records`` в запрошенном формате.
         """
         if not cmd.args:
             print("Использование: SHOW DATABASES | SHOW USER <name> | SHOW GROUP <name> | ...")
             return None
 
         what = cmd.args[0].upper() if cmd.args else ""
+
+        # ── v2: SHOW AS <format> [LIMIT <N>] ──────────────────────────
+        if what == "AS":
+            fmt = (cmd.kwargs.get("format") or "json").lower()
+            try:
+                inline_limit = int(cmd.kwargs.get("limit", "0") or 0)
+            except (TypeError, ValueError):
+                inline_limit = 0
+
+            # If a FROM was pending, run it (with the inline limit override).
+            if self.pending_from_scope:
+                records = self._execute_pending_from(limit_override=inline_limit)
+            else:
+                # Reuse the most recent records, but still honour the limit
+                records = list(self.last_records or [])
+                if inline_limit > 0:
+                    records = records[:inline_limit]
+
+            # Set the requested format for THIS output, then restore.
+            prev_format = self.current_format
+            prev_explicit = self._format_explicitly_set
+            self.current_format = fmt
+            self._format_explicitly_set = True
+            try:
+                self._output_records(records)
+            finally:
+                self.current_format = prev_format
+                self._format_explicitly_set = prev_explicit
+
+            self.last_records = records
+            self.last_result = records
+            return records
 
         # SHOW DATABASES
         if what in ("DATABASES", "DBS"):
@@ -717,13 +837,239 @@ class ScriptEngine:
                 return None
 
             self.last_records = records
-            self._output_records(records)
+            # Для SHOW <object> <name> (одна запись) — по умолчанию вертикальный формат.
+            # Но если FORMAT был явно установлен (FORMAT table, FORMAT json, и т.д.),
+            # используем _output_records с текущим форматом.
+            if len(records) == 1 and not self._format_explicitly_set:
+                # Одна запись, FORMAT не установлен явно — показываем key:value
+                self._output_single_record(records[0])
+            else:
+                # FORMAT явно установлен или несколько записей — используем _output_records
+                self._output_records(records)
             self.last_result = records
             return records
 
         except Exception as e:
             print(f"Ошибка запроса к БД: {e}", file=sys.stderr)
             return None
+
+    def _output_single_record(self, record: LdifRecord):
+        """Вывести одну запись в вертикальном формате (key: value).
+
+        Используется для SHOW USER <name>, SHOW GROUP <name> и т.д.,
+        когда у объекта 30+ атрибутов и табличный формат нечитаем.
+        """
+        flat = record.flatten(include_dn=True)
+
+        # Определяем максимальную ширину ключа для выравнивания
+        max_key_len = max(len(k) for k in flat.keys()) if flat else 20
+
+        # Приоритетные атрибуты первыми
+        priority = [
+            "dn", "sAMAccountName", "cn", "displayName", "name",
+            "objectClass", "mail", "department", "title", "description",
+            "userAccountControl", "whenCreated", "whenChanged",
+            "memberOf", "primaryGroupID", "objectSid", "objectGUID",
+            "sAMAccountType", "objectCategory",
+        ]
+
+        ordered_keys = []
+        seen = set()
+
+        # Сначала приоритетные
+        for key in priority:
+            if key in flat and key not in seen:
+                ordered_keys.append(key)
+                seen.add(key)
+
+        # Потом остальные по алфавиту
+        for key in sorted(flat.keys()):
+            if key not in seen:
+                ordered_keys.append(key)
+                seen.add(key)
+
+        # Выводим
+        print()
+        for key in ordered_keys:
+            value = flat[key]
+            # Для длинных значений memberOf — переносим на следующую строку
+            if key == "memberOf" and len(value) > 80:
+                print(f"  {key:<{max_key_len}} : ")
+                for member in value.split("; "):
+                    print(f"  {'':^{max_key_len}}   {member}")
+            elif key == "objectClass" and len(value) > 60:
+                print(f"  {key:<{max_key_len}} : ")
+                for cls in value.split("; "):
+                    print(f"  {'':^{max_key_len}}   {cls}")
+            else:
+                print(f"  {key:<{max_key_len}} : {value}")
+        print()
+
+    def _output_full_records(self, records: List[LdifRecord], fields=None, col_start: int = 0):
+        """Вывести записи в формате FULL с нумерацией колонок.
+
+        Формат FULL — каждая запись выводится как пронумерованный список
+        атрибутов. Удобно для web API — потребитель получает индексы
+        колонок и может обращаться к ним по номеру.
+
+        Пример вывода:
+          ═══ Запись 1 ═══
+          1 | dn               | CN=Admin,CN=Users,DC=kcrb,DC=local
+          2 | sAMAccountName   | admin
+          3 | cn               | Admin
+          4 | objectClass      | top; person; organizationalPerson; user
+          ...
+
+          ═══ Запись 2 ═══
+          1 | dn               | CN=Guest,CN=Users,DC=kcrb,DC=local
+          2 | sAMAccountName   | guest
+          ...
+
+        Args:
+            records: Список записей
+            fields: Фильтр полей (None = все)
+            col_start: Начальный номер колонки (0 = сквозная, 1 = с 1 для каждой записи)
+        """
+        # Определяем поля
+        if fields and fields != ["*"]:
+            all_keys = list(fields)
+            if "dn" not in all_keys:
+                all_keys.insert(0, "dn")
+        else:
+            # Собираем все ключи из всех записей, сохраняя порядок
+            all_keys = []
+            seen = set()
+
+            # Приоритетные атрибуты первыми
+            priority = [
+                "dn", "sAMAccountName", "cn", "displayName", "name",
+                "objectClass", "mail", "department", "title", "description",
+                "userAccountControl", "whenCreated", "whenChanged",
+                "memberOf", "primaryGroupID", "objectSid", "objectGUID",
+                "sAMAccountType", "objectCategory",
+            ]
+            for key in priority:
+                for rec in records:
+                    flat = rec.flatten(include_dn=True)
+                    if key in flat and key not in seen:
+                        all_keys.append(key)
+                        seen.add(key)
+                        break
+
+            # Остальные по порядку
+            for rec in records:
+                flat = rec.flatten(include_dn=True)
+                for key in flat.keys():
+                    if key not in seen:
+                        all_keys.append(key)
+                        seen.add(key)
+
+        # Определяем максимальную ширину имени колонки для выравнивания
+        max_key_len = max(len(k) for k in all_keys) if all_keys else 20
+
+        # Определяем ширину номера колонки
+        max_col_idx = col_start + len(all_keys)
+        col_num_width = len(str(max_col_idx))
+
+        # Если есть OUTPUT — пишем в JSON с нумерацией
+        if self.current_output:
+            self._write_full_json(records, all_keys, self.current_output, col_start)
+            print(f"Записано {len(records)} записей (FULL) в: {self.current_output}")
+            self.current_output = None
+            return
+
+        # Вывод в консоль
+        global_col_idx = col_start  # сквозной индекс
+
+        for rec_idx, record in enumerate(records):
+            flat = record.flatten(include_dn=True)
+
+            # Заголовок записи
+            print(f"\n═══ Запись {rec_idx + 1} ═══")
+
+            # Если col_start > 0 — начинаем с col_start для каждой записи
+            local_idx = col_start if col_start > 0 else global_col_idx
+
+            for key in all_keys:
+                value = flat.get(key, "")
+                local_idx += 1
+
+                # Для сквозной нумерации — увеличиваем global
+                if col_start == 0:
+                    global_col_idx = local_idx
+
+                print(f"  {local_idx:>{col_num_width}} | {key:<{max_key_len}} | {value}")
+
+            # Если col_start == 0 — сквозная нумерация продолжается
+            if col_start == 0:
+                global_col_idx = local_idx
+
+        print(f"\nВсего записей: {len(records)}, колонок: {len(all_keys)}")
+
+    def _write_full_json(self, records: List[LdifRecord], keys: List[str], filepath: str, col_start: int = 0):
+        """Записать FULL формат в JSON файл.
+
+        Структура JSON:
+        {
+          "columns": [
+            {"index": 1, "name": "dn"},
+            {"index": 2, "name": "sAMAccountName"},
+            ...
+          ],
+          "records": [
+            {
+              "1": "CN=Admin,...",
+              "2": "admin",
+              ...
+            },
+            ...
+          ],
+          "total_records": 5,
+          "total_columns": 30
+        }
+
+        Args:
+            records: Список записей
+            keys: Список имён колонок
+            filepath: Путь к файлу
+            col_start: Начальный номер колонки
+        """
+        import os as _os
+
+        # Строим маппинг колонок
+        columns = []
+        col_mapping = {}  # name -> index (str)
+        for i, key in enumerate(keys):
+            idx = (col_start if col_start > 0 else 0) + i + 1
+            if col_start == 0:
+                idx = i + 1
+            columns.append({"index": idx, "name": key})
+            col_mapping[key] = str(idx)
+
+        # Строим записи
+        json_records = []
+        for record in records:
+            flat = record.flatten(include_dn=True)
+            row = {}
+            for key in keys:
+                value = flat.get(key, "")
+                idx_str = col_mapping[key]
+                row[idx_str] = value
+            json_records.append(row)
+
+        # Итоговая структура
+        result = {
+            "columns": columns,
+            "records": json_records,
+            "total_records": len(records),
+            "total_columns": len(keys),
+        }
+
+        # Записываем
+        _os.makedirs(_os.path.dirname(_os.path.abspath(filepath)), exist_ok=True)
+        with open(filepath, "w", encoding="utf-8") as f:
+            json.dump(result, f, indent=2, ensure_ascii=False, default=str)
+            f.write("\n")
 
     @staticmethod
     def _escape_ldap_value(value: str) -> str:
@@ -807,7 +1153,14 @@ class ScriptEngine:
             ])
 
             self.last_records = records
-            self._output_records(records)
+            # Передаём fields в _output_records для корректного отображения
+            # таблицы (ограничиваем колонки теми, что реально запрошены)
+            if self.current_fields:
+                fields = self.current_fields
+            else:
+                # Автоопределение полей из данных
+                fields = None
+            self._output_records(records, fields=fields)
             self.last_result = records
             return records
 
@@ -830,7 +1183,7 @@ class ScriptEngine:
                 try:
                     dns_ldb = self.client.ldb
                     old_path = dns_ldb.url
-                    from sdb.config import get_ldb_path
+                    from app.sdb_lib.config import get_ldb_path
                     dns_ldb.url = get_ldb_path("dns")
                     records = dns_ldb.query(
                         filter_expr="(objectClass=dnsNode)",
@@ -1288,7 +1641,7 @@ class ScriptEngine:
             return None
 
         try:
-            from sdb.formatters.dataframe_fmt import DataframeFormatter
+            from app.sdb_lib.formatters.dataframe_fmt import DataframeFormatter
             df_formatter = DataframeFormatter()
             df = df_formatter.to_dataframe(
                 self.last_records,
@@ -1494,9 +1847,58 @@ class ScriptEngine:
 
     # ─── Вспомогательные методы ────────────────────────────────────────────
 
-    def _output_records(self, records: List[LdifRecord]):
+    def _cmd_full(self, cmd: ScriptCommand) -> Any:
+        """FULL [N] - показать все записи с нумерацией колонок.
+
+        FULL       — вывести все записи, каждый атрибут пронумерован
+                     (1: sAMAccountName = admin, 2: cn = Admin, ...)
+        FULL 1     — нумерация колонок с 1 для каждой записи
+
+        Удобно для web API — потребитель получает индексы колонок
+        и может обращаться к ним по номеру.
+
+        Комбинируется с OUTPUT для записи в JSON:
+          FULL; OUTPUT full.json;
+
+        FULL — разовая команда, не меняет текущий формат.
+        """
+        col_start_str = cmd.args[0] if cmd.args else ""
+        col_start = int(col_start_str) if col_start_str else 0
+
+        # Если есть кэш записей — выводим их
+        if self.last_records:
+            # Сохраняем текущий формат и OUTPUT
+            saved_format = self.current_format
+            saved_output = self.current_output
+
+            # Выводим в FULL формате (одноразово)
+            self._output_full_records(self.last_records, fields=self.current_fields, col_start=col_start)
+
+            # Восстанавливаем формат и OUTPUT (если не был использован)
+            # OUTPUT уже сброшен в _output_full_records если был использован
+            if self.current_output is None and saved_output:
+                # OUTPUT был использован — не восстанавливаем
+                pass
+            else:
+                self.current_output = saved_output
+            self.current_format = saved_format
+            return self.last_records
+        else:
+            print("Нет записей для вывода. Сначала выполните SHOW или SELECT.")
+            return None
+
+    def _output_records(self, records: List[LdifRecord], fields=None):
         """Вывести записи в текущем формате."""
         if not records:
+            return
+
+        # Поля: из аргумента или из текущего состояния
+        output_fields = fields or self.current_fields
+
+        # vertical — вертикальный key:value формат
+        if self.current_format == "vertical":
+            for rec in records:
+                self._output_single_record(rec)
             return
 
         # Для XLSX формата не выводим в консоль - только в файл
@@ -1506,10 +1908,12 @@ class ScriptEngine:
                 formatter.write_to_file(
                     records,
                     self.current_output,
-                    fields=self.current_fields,
+                    fields=output_fields,
                 )
                 print(f"Записано {len(records)} записей в: {self.current_output}")
                 self.current_output = None
+            else:
+                print(f"(XLSX: {len(records)} записей. Используйте OUTPUT <file.xlsx> для записи в файл)")
             return
 
         formatter = get_formatter(self.current_format)
@@ -1518,14 +1922,14 @@ class ScriptEngine:
             formatter.write_to_file(
                 records,
                 self.current_output,
-                fields=self.current_fields,
+                fields=output_fields,
             )
             print(f"Записано {len(records)} записей в: {self.current_output}")
             self.current_output = None
         else:
             output = formatter.format_records(
                 records,
-                fields=self.current_fields,
+                fields=output_fields,
             )
             if output and output.strip() and output.strip() != "(нет записей)":
                 print(output)

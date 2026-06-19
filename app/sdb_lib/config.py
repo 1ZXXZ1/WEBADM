@@ -263,7 +263,7 @@ SAMBA_TOOL_HELP = {
 
 # ─── Форматы вывода ──────────────────────────────────────────────────────────
 
-OUTPUT_FORMATS = ["json", "csv", "tsv", "table", "ldif", "dataframe", "xlsx", "raw"]
+OUTPUT_FORMATS = ["json", "csv", "tsv", "table", "table_presto", "table_grid", "table_simple", "table_rounded", "table_double", "ldif", "vertical", "dataframe", "xlsx", "raw"]
 
 # Формат по умолчанию
 DEFAULT_FORMAT = "table"

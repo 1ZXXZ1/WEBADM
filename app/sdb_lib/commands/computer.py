@@ -4,9 +4,9 @@
 
 from typing import List, Optional
 
-from sdb.parser.ldif import LdifRecord
-from sdb.connectors.ldb import LdbConnector
-from sdb.connectors.sambatool import SambaToolConnector
+from app.sdb_lib.parser.ldif import LdifRecord
+from app.sdb_lib.connectors.ldb import LdbConnector
+from app.sdb_lib.connectors.sambatool import SambaToolConnector
 
 
 class ComputerCommands:

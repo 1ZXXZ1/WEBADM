@@ -47,6 +47,8 @@ from app.models.ai import (
     AIDataSchemaResponse,
     AIPipelineConfig,
     AIPipelineNode,
+    AISdbRequest,
+    AISdbResponse,
 )
 from app.models.ai_chat import (
     ChatCreateRequest,
@@ -308,7 +310,12 @@ def _get_user_permissions(request: Request) -> set:
         "Generates task builder actions from a natural-language prompt. "
         "Uses LLM (Polza.ai) and the server's own OpenAPI specification. "
         "In Safe Mode (default), real data values are hidden from the LLM "
-        "and replaced with {{USER_INPUT}} placeholders."
+        "and replaced with {{USER_INPUT}} placeholders.\n\n"
+        "v2.1.1: accepts optional `system` and `mode` fields "
+        "(API_SERVER_SDB_FIX.md). When `system` is provided, it "
+        "REPLACES the hardcoded ETL Constructor system prompt. When "
+        "`mode='sdb'` is set (and `system` is not), the built-in "
+        "SDB_SYSTEM_PROMPT is used."
     ),
 )
 async def ai_assistant(
@@ -321,10 +328,61 @@ async def ai_assistant(
         request=request,
         action="ai_assistant",
         detail=f"safe={body.safe_mode} model_override={body.model_override} "
-               f"prompt_len={len(body.prompt)}",
+               f"prompt_len={len(body.prompt)} mode={getattr(body, 'mode', None)} "
+               f"system_override={'yes' if getattr(body, 'system', None) else 'no'}",
     )
 
     result = await ai_service.process_ai_request(body)
+    return result
+
+
+# ── SDB AI Assistant (v2.1.1 — API_SERVER_SDB_FIX.md Variant 2) ────────
+
+
+@router.post(
+    "/sdb",
+    response_model=AISdbResponse,
+    summary="AI Assistant for SDB mode (generates SDB scripts)",
+    description=(
+        "v2.1.1 — dedicated endpoint for the frontend SDB AI chat.\n\n"
+        "Returns the SAME `actions` shape as `/ai/assistant` (so the "
+        "frontend constructor code path is reused unchanged), but uses "
+        "the built-in `SDB_SYSTEM_PROMPT` by default. This means the "
+        "AI actually understands SDB script syntax "
+        "(`USE sam; FROM USERS; SHOW AS json LIMIT 5;`) and returns "
+        "real scripts instead of `{USER_INPUT}` placeholders.\n\n"
+        "Optional fields:\n"
+        "- `system` — replace the built-in SDB prompt with a custom "
+        "  one (Variant 1 in the fix doc).\n"
+        "- `data` — extra context appended to the user message as a "
+        "  `[DATA CONTEXT]` block.\n"
+        "- `model_override` — use a specific LLM model for this call.\n"
+        "- `context` — task-graph context (same as `/ai/assistant`).\n"
+        "- `safe_mode` — mask sensitive values in `context` (default true).\n\n"
+        "The endpoint always returns `mode='sdb'` so the frontend can "
+        "branch on it without inspecting the actions list."
+    ),
+)
+async def ai_sdb_assistant(
+    request: Request,
+    body: AISdbRequest,
+    api_key: ApiKeyDep,
+) -> AISdbResponse:
+    """Process an SDB-mode AI request and return a structured action list.
+
+    Internally dispatches to :func:`ai_service.process_sdb_request`,
+    which reuses the Polza.ai call / retry / schema-validation
+    pipeline from `process_ai_request` so behaviour stays consistent.
+    """
+    _log_ai_action(
+        request=request,
+        action="ai_sdb_assistant",
+        detail=f"safe={body.safe_mode} model_override={body.model_override} "
+               f"prompt_len={len(body.prompt)} "
+               f"system_override={'yes' if body.system else 'no'}",
+    )
+
+    result = await ai_service.process_sdb_request(body)
     return result
 
 
@@ -1125,9 +1183,17 @@ data_transform(action='batch', snapshot_name='users', batch_steps=[
             if chat_system_prompt:
                 chat_system += f"\n### ADDITIONAL INSTRUCTIONS\n{chat_system_prompt}\n"
 
-            # v1.9-3-6: Override/extend system prompt with per-message 'system' param
+            # v2.3: Per-message ``body.system`` is now a FULL OVERRIDE.
+            # If the caller supplies a system prompt in the request body,
+            # it REPLACES the hardcoded ETL Constructor prompt entirely.
+            # This lets the frontend send custom assistant personas per
+            # message. The masker context block (security tokens) is
+            # still appended below regardless.
             if body.system:
-                chat_system += f"\n### USER SYSTEM PROMPT\n{body.system}\n"
+                chat_system = body.system
+                # Re-append chat session instructions on top of override
+                if chat_system_prompt:
+                    chat_system += f"\n\n### ADDITIONAL SESSION INSTRUCTIONS\n{chat_system_prompt}\n"
 
             # v2.2: Add masking context to system prompt so AI understands tokens
             masker = create_masker_from_config()

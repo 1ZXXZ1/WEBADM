@@ -19,9 +19,10 @@ sdb - Samba Database Query Tool
   - SQL-like SELECT запросы
   - Табличный вывод через tabulate
   - XLSX экспорт с формулами Excel и многостраничными книгами
+  - FULL — вывод с нумерацией колонок (для web API)
 
 Пример использования:
-    from sdb import SdbClient
+    from app.sdb_lib import SdbClient
 
     client = SdbClient()  # sudo включён по умолчанию
     records = client.query("sam", "(objectClass=user)", attrs=["sAMAccountName", "cn"])
@@ -35,9 +36,16 @@ sdb - Samba Database Query Tool
     sudo bash install.sh
 """
 
-__version__ = "1.2.3-5"
+__version__ = "1.2.3-6"
 __author__ = "SDB Tool"
 
-from sdb.client import SdbClient
+
+def __getattr__(name):
+    """Ленивый импорт — SdbClient импортируется только при обращении."""
+    if name == "SdbClient":
+        from app.sdb_lib.client import SdbClient
+        return SdbClient
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 __all__ = ["SdbClient"]

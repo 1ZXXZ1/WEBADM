@@ -85,6 +85,11 @@ ldbsearch - достаточно простых инструкций.
     # Поиск подстроки
     SEARCH "administrator";
 
+    # Полный вывод с нумерацией колонок (для web API)
+    FULL;                        # Все записи, колонки пронумерованы
+    FULL 1;                      # Нумерация колонок с 1 для каждой записи
+    OUTPUT full.json;            # Запись результата FULL в JSON
+
     # Экспорт в pandas DataFrame (Python API)
     DATAFRAME;
 ─────────────────────────────────────────────
@@ -100,6 +105,7 @@ class CommandType(Enum):
     """Типы команд скриптового языка SDB."""
     USE = "USE"
     SELECT = "SELECT"
+    FROM = "FROM"
     WHERE = "WHERE"
     FORMAT = "FORMAT"
     OUTPUT = "OUTPUT"
@@ -117,6 +123,7 @@ class CommandType(Enum):
     DELETE = "DELETE"
     LIST = "LIST"
     SYNTHESIS = "SYNTHESIS"
+    FULL = "FULL"
     COMMENT = "COMMENT"
     EMPTY = "EMPTY"
 
@@ -203,6 +210,9 @@ class ScriptParser:
         buffer = ""
         buffer_start_line = 0
 
+        # Очередь отложенных команд (от автосплитта)
+        self._pending_commands = []
+
         for raw_line in lines:
             line_num += 1
             stripped = raw_line.strip()
@@ -239,12 +249,20 @@ class ScriptParser:
                     cmd = self._parse_single_command(cmd_str, buffer_start_line)
                     if cmd is not None:
                         commands.append(cmd)
+                    # Добавляем отложенные команды от автосплитта
+                    if self._pending_commands:
+                        commands.extend(self._pending_commands)
+                        self._pending_commands = []
 
         if buffer.strip():
             cmd_str = buffer.rstrip(";").strip()
             cmd = self._parse_single_command(cmd_str, buffer_start_line)
             if cmd is not None:
                 commands.append(cmd)
+            # Добавляем отложенные команды от автосплитта
+            if self._pending_commands:
+                commands.extend(self._pending_commands)
+                self._pending_commands = []
 
         return commands
 
@@ -274,6 +292,50 @@ class ScriptParser:
 
         return parts
 
+    # Ключевые слова начала команд — для автосплитта без ;
+    _COMMAND_KEYWORDS = (
+        "USE", "SELECT", "WHERE", "FORMAT", "OUTPUT", "FIELDS", "LIMIT",
+        "SHOW", "LIST", "TOOL", "SYNTHESIS", "ENABLE", "DISABLE", "DELETE",
+        "CREATE", "IMPORT", "SET", "SEARCH", "DATAFRAME", "FULL",
+    )
+
+    def _auto_split_commands(self, cmd_str: str) -> list:
+        """Разбить строку на отдельные команды по ключевым словам.
+
+        Если пользователь забыл поставить ; между командами,
+        распознаём начало новой команды по ключевому слову
+        (USE, SELECT, FORMAT, SHOW, и т.д.) и автоматически разбиваем.
+
+        Пример: "FORMAT table USE sam" → ["FORMAT table", "USE sam"]
+        """
+        tokens = cmd_str.split()
+        if not tokens:
+            return [cmd_str]
+
+        # Первая команда начинается с первого токена
+        commands = []
+        current_parts = [tokens[0]]
+        in_quotes = False
+
+        for token in tokens[1:]:
+            # Проверяем, является ли токен началом новой команды
+            upper_token = token.upper()
+            if not in_quotes and upper_token in self._COMMAND_KEYWORDS:
+                # Это начало новой команды — сохраняем текущую
+                if current_parts:
+                    commands.append(" ".join(current_parts))
+                current_parts = [token]
+            else:
+                current_parts.append(token)
+                # Отслеживаем кавычки
+                if '"' in token:
+                    in_quotes = not in_quotes
+
+        if current_parts:
+            commands.append(" ".join(current_parts))
+
+        return commands
+
     def _parse_single_command(self, cmd_str: str, line_num: int) -> Optional[ScriptCommand]:
         """
         Разобрать одну команду (без точки с запятой).
@@ -282,11 +344,38 @@ class ScriptParser:
         Поддерживает многословные имена объектов:
           SHOW GROUP Domain Admins  →  args=["group", "Domain Admins"]
           SHOW GPO "Default Domain Policy"  →  args=["gpo", "Default Domain Policy"]
+
+        Если пользователь забыл ; между командами, автоматически
+        разбиваем по ключевым словам:
+          "FORMAT table USE sam" → FORMAT table + USE sam
         """
         if not cmd_str:
             return None
 
         upper = cmd_str.upper().strip()
+
+        # Проверяем, нужно ли автосплиттить по ключевым словам.
+        # Это только для команд, которые принимают ровно один аргумент
+        # и где второй токен может быть ключевым словом другой команды.
+        _SINGLE_ARG_COMMANDS = ("FORMAT", "OUTPUT", "USE", "LIMIT", "FULL")
+        first_word = upper.split()[0] if upper.split() else ""
+        if first_word in _SINGLE_ARG_COMMANDS:
+            parts = self._auto_split_commands(cmd_str)
+            if len(parts) > 1:
+                # Рекурсивно разбираем каждую часть
+                result = None
+                for part in parts:
+                    cmd = self._parse_single_command(part, line_num)
+                    if cmd is not None:
+                        # Возвращаем первую команду, остальные ставим в очередь
+                        if result is None:
+                            result = cmd
+                        else:
+                            # Сохраняем дополнительные команды
+                            if not hasattr(self, '_pending_commands'):
+                                self._pending_commands = []
+                            self._pending_commands.append(cmd)
+                return result
 
         # ─── USE <database> ────────────────────────────────────────────────
         if upper.startswith("USE "):
@@ -301,6 +390,34 @@ class ScriptParser:
         # ─── SELECT <fields> FROM <scope> [WHERE <filter>] ────────────────
         if upper.startswith("SELECT "):
             return self._parse_select(cmd_str, line_num)
+
+        # ─── FROM <table> [WHERE <filter>]  (v2: shorthand for SELECT * ──)
+        # Frontend SDB AI prompt uses this style:
+        #     USE sam;
+        #     FROM USERS;
+        #     SHOW AS json LIMIT 5;
+        # We store the FROM scope+filter on the command and let the engine
+        # defer execution until the next SHOW AS / FORMAT command.
+        if upper.startswith("FROM "):
+            rest = cmd_str[5:].strip()
+            where_idx = rest.upper().find(" WHERE ")
+            if where_idx == -1:
+                scope = rest.strip().strip('"').strip("'")
+                filter_str = ""
+            else:
+                scope = rest[:where_idx].strip().strip('"').strip("'")
+                filter_str = rest[where_idx + 7:].strip()
+            # Strip optional trailing semicolon (parser usually handles this
+            # but multi-line scripts may slip one through).
+            scope = scope.rstrip(";").strip()
+            filter_str = filter_str.rstrip(";").strip()
+            return ScriptCommand(
+                cmd_type=CommandType.FROM,
+                args=[scope],
+                kwargs={"filter": filter_str},
+                raw=cmd_str,
+                line_num=line_num,
+            )
 
         # ─── WHERE <filter> ───────────────────────────────────────────────
         if upper.startswith("WHERE "):
@@ -328,6 +445,24 @@ class ScriptParser:
             return ScriptCommand(
                 cmd_type=CommandType.OUTPUT,
                 args=[filepath],
+                raw=cmd_str,
+                line_num=line_num,
+            )
+
+        # ─── FULL [N] ────────────────────────────────────────────────────
+        if upper.startswith("FULL"):
+            # FULL         → показать все записи с нумерацией колонок
+            # FULL 1       → нумерация колонок начиная с 1 для каждой записи
+            rest = cmd_str[4:].strip()
+            col_start = None
+            if rest:
+                try:
+                    col_start = int(rest)
+                except ValueError:
+                    col_start = None
+            return ScriptCommand(
+                cmd_type=CommandType.FULL,
+                args=[str(col_start) if col_start is not None else ""],
                 raw=cmd_str,
                 line_num=line_num,
             )
@@ -463,6 +598,39 @@ class ScriptParser:
         if upper.startswith("SHOW "):
             rest = cmd_str[5:].strip()
             rest_upper = rest.upper()
+
+            # ── v2: SHOW AS <format> [LIMIT <N>] ──────────────────────────
+            # Frontend SDB AI prompt uses this syntax to render results:
+            #     SHOW AS json LIMIT 5;
+            #     SHOW AS csv;
+            #     SHOW AS xlsx;
+            # We tag the command with format=... and optional limit=N so
+            # the engine knows to either execute a pending FROM query or
+            # re-emit last_records in the requested format.
+            if rest_upper.startswith("AS "):
+                as_rest = rest[3:].strip()
+                # Split off "LIMIT <N>" if present
+                fmt_str = as_rest
+                inline_limit = 0
+                lim_idx = as_rest.upper().rfind(" LIMIT ")
+                if lim_idx != -1:
+                    fmt_str = as_rest[:lim_idx].strip()
+                    lim_part = as_rest[lim_idx + 7:].strip().rstrip(";").strip()
+                    try:
+                        inline_limit = int(lim_part)
+                    except ValueError:
+                        inline_limit = 0
+                fmt_str = fmt_str.strip().strip('"').strip("'").rstrip(";").strip().lower()
+                kwargs: Dict[str, str] = {"format": fmt_str}
+                if inline_limit:
+                    kwargs["limit"] = str(inline_limit)
+                return ScriptCommand(
+                    cmd_type=CommandType.SHOW,
+                    args=["AS"],
+                    kwargs=kwargs,
+                    raw=cmd_str,
+                    line_num=line_num,
+                )
 
             # SHOW DATABASES
             if rest_upper in ("DATABASES", "DBS"):

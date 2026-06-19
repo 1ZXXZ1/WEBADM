@@ -2,11 +2,11 @@
 Форматеры вывода для SDB - JSON, CSV, TSV, таблица, LDIF, DataFrame, XLSX.
 """
 
-from sdb.formatters.json_fmt import JsonFormatter
-from sdb.formatters.csv_fmt import CsvFormatter
-from sdb.formatters.tsv_fmt import TsvFormatter
-from sdb.formatters.table_fmt import TableFormatter, TABLE_STYLES
-from sdb.formatters.ldif_fmt import LdifFormatter
+from app.sdb_lib.formatters.json_fmt import JsonFormatter
+from app.sdb_lib.formatters.csv_fmt import CsvFormatter
+from app.sdb_lib.formatters.tsv_fmt import TsvFormatter
+from app.sdb_lib.formatters.table_fmt import TableFormatter, TABLE_STYLES
+from app.sdb_lib.formatters.ldif_fmt import LdifFormatter
 
 FORMATTERS = {
     "json": JsonFormatter,
@@ -32,6 +32,7 @@ def get_formatter(fmt: str):
       - table_rounded:  Таблица с закруглёнными рамками
       - table_double:   Таблица с двойными рамками
       - ldif:     LDIF формат (обратный экспорт)
+      - vertical: Вертикальный key:value формат (одна запись = блок атрибутов)
       - dataframe: pandas DataFrame (требует pandas)
       - xlsx:     Excel XLSX формат (требует openpyxl)
 
@@ -43,14 +44,19 @@ def get_formatter(fmt: str):
     """
     fmt_lower = fmt.lower()
 
+    # vertical — обрабатывается в ScriptEngine._output_records
+    if fmt_lower == "vertical":
+        # Возвращаем TableFormatter как заглушку (реальный вывод в _output_records)
+        return TableFormatter()
+
     # DataFrame - загружаем лениво
     if fmt_lower == "dataframe":
-        from sdb.formatters.dataframe_fmt import DataframeFormatter
+        from app.sdb_lib.formatters.dataframe_fmt import DataframeFormatter
         return DataframeFormatter()
 
     # XLSX - загружаем лениво
     if fmt_lower == "xlsx":
-        from sdb.formatters.xlsx_fmt import XlsxFormatter
+        from app.sdb_lib.formatters.xlsx_fmt import XlsxFormatter
         return XlsxFormatter()
 
     # Проверяем стиль таблицы (table_presto, table_grid, и т.д.)
@@ -60,7 +66,7 @@ def get_formatter(fmt: str):
 
     if fmt_lower not in FORMATTERS:
         available = ", ".join(
-            list(FORMATTERS.keys()) + ["dataframe", "xlsx"] + list(TABLE_STYLES.keys())
+            list(FORMATTERS.keys()) + ["vertical", "full", "dataframe", "xlsx"] + list(TABLE_STYLES.keys())
         )
         raise ValueError(f"Неизвестный формат '{fmt}'. Доступные: {available}")
     return FORMATTERS[fmt_lower]()

@@ -1,35 +1,28 @@
 """
-Tochka vhoda dlya zapuska: python -m sdb
+Точка входа для запуска: python -m app.sdb_lib
 
-Dobavlyaem direktoriyu paketa v sys.path,
-chtoby rabotalo i s sudo, i iz lyuboj direktorii.
-
-Dlya sistemnoj ustanovki (rekomenduetsya):
-    sudo pip3 install .
-    # ili
-    cd /path/to/sdb/ && sudo python3 setup.py install
-
-Posle ustanovki sdb dostupen kak komanda:
-    sdb -e "USE sam; SELECT * FROM *;"
+Добавляем директорию пакета в sys.path,
+чтобы работало и с sudo, и из любой директории.
 """
 
 import sys
 import os
 
-# Dobavlyaem roditel'skuyu direktoriyu sdb/ v sys.path,
-# chtoby `from sdb import ...` rabotal iz lyubogo mesta
-_pkg_dir = os.path.dirname(os.path.abspath(__file__))
-_parent_dir = os.path.dirname(_pkg_dir)
-if _parent_dir not in sys.path:
-    sys.path.insert(0, _parent_dir)
+# Добавляем проектный корень в sys.path,
+# чтобы `from app.sdb_lib import ...` работал из любого места
+_pkg_dir = os.path.dirname(os.path.abspath(__file__))    # app/sdb_lib/
+_app_dir = os.path.dirname(_pkg_dir)                      # app/
+_project_dir = os.path.dirname(_app_dir)                   # проектный корень
+for p in [_project_dir, _app_dir, _pkg_dir]:
+    if p not in sys.path:
+        sys.path.insert(0, p)
 
-# Takzhe dobavlyaem tekushchuyu rabochuyu direktoriyu,
-# na sluchaj esli sdb zapuskaetsya iz svoej direktorii
+# Также добавляем текущую рабочую директорию
 _cwd = os.getcwd()
 if _cwd not in sys.path:
     sys.path.insert(0, _cwd)
 
-from sdb.cli import main
+from app.sdb_lib.cli import main
 
 if __name__ == "__main__":
     main()
