@@ -5,7 +5,7 @@
 **Samba AD Panel** — это веб-панель управления для Samba Active Directory Domain Controller. Приложение предоставляет графический интерфейс для администрирования домена Samba AD DC через взаимодействие с Python/FastAPI бэкендом по REST API.
 
 - **Версия фронтенда:** 1.1.6
-- **Версия API:** v2.8 / v1.1.13-3
+- **Версия API:** pr-a-1.4
 - **Стек:** Next.js 16 + React 19 + TypeScript + Tailwind CSS 4 + shadcn/ui + Zustand + Prisma (SQLite) + Axios + i18next
 
 ## Содержание документации
