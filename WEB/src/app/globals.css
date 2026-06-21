@@ -1,0 +1,571 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+  --color-sidebar-ring: var(--sidebar-ring);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar: var(--sidebar);
+  --color-chart-5: var(--chart-5);
+  --color-chart-4: var(--chart-4);
+  --color-chart-3: var(--chart-3);
+  --color-chart-2: var(--chart-2);
+  --color-chart-1: var(--chart-1);
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--accent);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-muted: var(--muted);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+}
+
+:root {
+  --radius: 0.625rem;
+  --background: oklch(1 0 0);
+  --foreground: oklch(0.145 0 0);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.145 0 0);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.145 0 0);
+  --primary: oklch(0.205 0 0);
+  --primary-foreground: oklch(0.985 0 0);
+  --secondary: oklch(0.97 0 0);
+  --secondary-foreground: oklch(0.205 0 0);
+  --muted: oklch(0.97 0 0);
+  --muted-foreground: oklch(0.556 0 0);
+  --accent: oklch(0.97 0 0);
+  --accent-foreground: oklch(0.205 0 0);
+  --destructive: oklch(0.577 0.245 27.325);
+  --border: oklch(0.922 0 0);
+  --input: oklch(0.922 0 0);
+  --ring: oklch(0.708 0 0);
+  --chart-1: oklch(0.646 0.222 41.116);
+  --chart-2: oklch(0.6 0.118 184.704);
+  --chart-3: oklch(0.398 0.07 227.392);
+  --chart-4: oklch(0.828 0.189 84.429);
+  --chart-5: oklch(0.769 0.188 70.08);
+  --sidebar: oklch(0.985 0 0);
+  --sidebar-foreground: oklch(0.145 0 0);
+  --sidebar-primary: oklch(0.205 0 0);
+  --sidebar-primary-foreground: oklch(0.985 0 0);
+  --sidebar-accent: oklch(0.97 0 0);
+  --sidebar-accent-foreground: oklch(0.205 0 0);
+  --sidebar-border: oklch(0.922 0 0);
+  --sidebar-ring: oklch(0.708 0 0);
+}
+
+.dark {
+  --background: oklch(0.145 0 0);
+  --foreground: oklch(0.985 0 0);
+  --card: oklch(0.205 0 0);
+  --card-foreground: oklch(0.985 0 0);
+  --popover: oklch(0.205 0 0);
+  --popover-foreground: oklch(0.985 0 0);
+  --primary: oklch(0.922 0 0);
+  --primary-foreground: oklch(0.205 0 0);
+  --secondary: oklch(0.269 0 0);
+  --secondary-foreground: oklch(0.985 0 0);
+  --muted: oklch(0.269 0 0);
+  --muted-foreground: oklch(0.708 0 0);
+  --accent: oklch(0.269 0 0);
+  --accent-foreground: oklch(0.985 0 0);
+  --destructive: oklch(0.704 0.191 22.216);
+  --border: oklch(1 0 0 / 10%);
+  --input: oklch(1 0 0 / 15%);
+  --ring: oklch(0.556 0 0);
+  --chart-1: oklch(0.488 0.243 264.376);
+  --chart-2: oklch(0.696 0.17 162.48);
+  --chart-3: oklch(0.769 0.188 70.08);
+  --chart-4: oklch(0.627 0.265 303.9);
+  --chart-5: oklch(0.645 0.246 16.439);
+  --sidebar: oklch(0.205 0 0);
+  --sidebar-foreground: oklch(0.985 0 0);
+  --sidebar-primary: oklch(0.488 0.243 264.376);
+  --sidebar-primary-foreground: oklch(0.985 0 0);
+  --sidebar-accent: oklch(0.269 0 0);
+  --sidebar-accent-foreground: oklch(0.985 0 0);
+  --sidebar-border: oklch(1 0 0 / 10%);
+  --sidebar-ring: oklch(0.556 0 0);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+}
+
+/* ─── Markdown / Prose styles for AI chat ──────────────────────────────── */
+.md-prose {
+  max-width: none;
+  font-size: 0.75rem;
+  line-height: 1.6;
+  word-wrap: break-word;
+  overflow-wrap: break-word;
+  color: var(--foreground);
+}
+.md-prose > *:first-child {
+  margin-top: 0;
+}
+.md-prose > *:last-child {
+  margin-bottom: 0;
+}
+.md-prose p {
+  margin-top: 0.375rem;
+  margin-bottom: 0.375rem;
+}
+.md-prose p:first-child {
+  margin-top: 0;
+}
+.md-prose p:last-child {
+  margin-bottom: 0;
+}
+.md-prose em {
+  font-style: italic !important;
+  color: oklch(0.45 0.02 260);
+}
+.dark .md-prose em {
+  color: oklch(0.85 0.04 260);
+}
+.md-prose strong {
+  font-weight: 700 !important;
+  color: oklch(0.2 0 0);
+}
+.dark .md-prose strong {
+  color: oklch(0.95 0 0);
+}
+.md-prose del {
+  text-decoration: line-through;
+  opacity: 0.6;
+}
+.md-prose h1 { font-size: 1.125rem; font-weight: 700; margin-top: 0.75rem; margin-bottom: 0.375rem; line-height: 1.3; border-bottom: 1px solid oklch(0.922 0 0 / 40%); padding-bottom: 0.25rem; }
+.md-prose h2 { font-size: 0.9375rem; font-weight: 700; margin-top: 0.625rem; margin-bottom: 0.25rem; line-height: 1.3; }
+.md-prose h3 { font-size: 0.8125rem; font-weight: 600; margin-top: 0.5rem; margin-bottom: 0.25rem; line-height: 1.3; }
+.md-prose h4 { font-size: 0.75rem; font-weight: 600; margin-top: 0.5rem; margin-bottom: 0.25rem; line-height: 1.3; }
+.dark .md-prose h1 { border-color: oklch(1 0 0 / 10%); }
+.md-prose ul {
+  list-style-type: disc;
+  padding-left: 1.5rem;
+  margin-top: 0.25rem;
+  margin-bottom: 0.375rem;
+}
+.md-prose ol {
+  list-style-type: decimal;
+  padding-left: 1.5rem;
+  margin-top: 0.25rem;
+  margin-bottom: 0.375rem;
+}
+.md-prose li {
+  margin-bottom: 0.1875rem;
+  line-height: 1.5;
+}
+.md-prose li > ul,
+.md-prose li > ol {
+  margin-top: 0.125rem;
+  margin-bottom: 0.125rem;
+}
+.md-prose code {
+  font-family: var(--font-geist-mono), ui-monospace, monospace;
+  font-size: 0.6875rem;
+  background: oklch(0.5 0.15 264 / 12%);
+  color: oklch(0.5 0.15 264);
+  padding: 0.1rem 0.3rem;
+  border-radius: 0.25rem;
+  word-break: break-word;
+}
+.dark .md-prose code {
+  background: oklch(0.6 0.15 264 / 15%);
+  color: oklch(0.75 0.12 264);
+}
+.md-prose pre {
+  background: oklch(0.97 0 0 / 60%);
+  border: 1px solid oklch(0.922 0 0 / 40%);
+  border-radius: 0.5rem;
+  padding: 0.625rem 0.75rem;
+  overflow-x: auto;
+  margin-top: 0.375rem;
+  margin-bottom: 0.375rem;
+  font-size: 0.6875rem;
+  line-height: 1.5;
+}
+.dark .md-prose pre {
+  background: oklch(0.15 0 0 / 60%);
+  border-color: oklch(1 0 0 / 12%);
+}
+.md-prose pre code {
+  background: transparent;
+  padding: 0;
+  font-size: inherit;
+  border-radius: 0;
+  color: inherit;
+  word-break: normal;
+}
+.md-prose a {
+  color: oklch(0.55 0.2 250);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.md-prose a:hover {
+  color: oklch(0.45 0.25 250);
+}
+.dark .md-prose a {
+  color: oklch(0.65 0.2 250);
+}
+.dark .md-prose a:hover {
+  color: oklch(0.75 0.22 250);
+}
+.md-prose blockquote {
+  border-left: 3px solid oklch(0.55 0.15 250);
+  padding-left: 0.75rem;
+  margin-left: 0;
+  margin-top: 0.375rem;
+  margin-bottom: 0.375rem;
+  color: oklch(0.45 0 0);
+  font-style: italic;
+}
+.dark .md-prose blockquote {
+  color: oklch(0.7 0 0);
+  border-left-color: oklch(0.6 0.15 250);
+}
+.md-prose hr {
+  border: none;
+  border-top: 1px solid oklch(0.922 0 0);
+  margin: 0.625rem 0;
+}
+.dark .md-prose hr {
+  border-top-color: oklch(1 0 0 / 12%);
+}
+/* ─── Table styles ──────────────────────────────────────────────────── */
+.md-prose table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.6875rem;
+  margin-top: 0.375rem;
+  margin-bottom: 0.5rem;
+  overflow-x: auto;
+  display: block;
+}
+.md-prose thead {
+  background: oklch(0.95 0 0 / 50%);
+}
+.dark .md-prose thead {
+  background: oklch(0.25 0 0 / 50%);
+}
+.md-prose th {
+  text-align: left;
+  padding: 0.375rem 0.5rem;
+  border: 1px solid oklch(0.85 0 0 / 50%);
+  font-weight: 600;
+  white-space: nowrap;
+}
+.dark .md-prose th {
+  border-color: oklch(1 0 0 / 12%);
+}
+.md-prose td {
+  padding: 0.3rem 0.5rem;
+  border: 1px solid oklch(0.85 0 0 / 30%);
+  word-break: break-word;
+}
+.dark .md-prose td {
+  border-color: oklch(1 0 0 / 8%);
+}
+.md-prose tbody tr:nth-child(even) {
+  background: oklch(0.97 0 0 / 30%);
+}
+.dark .md-prose tbody tr:nth-child(even) {
+  background: oklch(0.2 0 0 / 20%);
+}
+.md-prose tbody tr:hover {
+  background: oklch(0.94 0 0 / 50%);
+}
+.dark .md-prose tbody tr:hover {
+  background: oklch(0.25 0 0 / 30%);
+}
+.md-prose img {
+  max-width: 100%;
+  border-radius: 0.375rem;
+}
+/* ─── Task list (GFM) ──────────────────────────────────────────────── */
+.md-prose ul:has(> li > input[type="checkbox"]) {
+  list-style-type: none;
+  padding-left: 0.25rem;
+}
+.md-prose li > input[type="checkbox"] {
+  margin-right: 0.375rem;
+  vertical-align: middle;
+  accent-color: oklch(0.55 0.2 250);
+}
+
+/* ─── Resizable dialogs (Management module) ────────────────────────── */
+/* Applied via .mgmt-resizable class on DialogContent. Allows the user
+ * to drag-resize the dialog from the bottom-right corner. The dialog
+ * content becomes scrollable when the user shrinks it below content size.
+ */
+.mgmt-resizable {
+  resize: both;
+  overflow: auto;
+  min-width: 480px;
+  min-height: 320px;
+  max-width: 98vw;
+  max-height: 95vh;
+}
+/* Visual resize handle indicator in the bottom-right corner */
+.mgmt-resizable::after {
+  content: '';
+  position: sticky;
+  bottom: 0;
+  right: 0;
+  display: block;
+  width: 16px;
+  height: 16px;
+  margin-left: auto;
+  margin-top: -16px;
+  pointer-events: none;
+  background:
+    linear-gradient(135deg, transparent 50%, oklch(0.65 0 0 / 0.4) 50%, oklch(0.65 0 0 / 0.4) 60%, transparent 60%,
+    transparent 70%, oklch(0.65 0 0 / 0.4) 70%, oklch(0.65 0 0 / 0.4) 80%, transparent 80%);
+}
+
+/* ─── Admin-revoked key banner ─────────────────────────────────────── */
+.mgmt-revoked-banner {
+  background: linear-gradient(90deg, oklch(0.95 0.05 25 / 0.8), oklch(0.92 0.06 25 / 0.6));
+  border-left: 3px solid oklch(0.65 0.22 25);
+  color: oklch(0.4 0.18 25);
+  animation: mgmt-banner-pulse 2.5s ease-in-out infinite;
+}
+.dark .mgmt-revoked-banner {
+  background: linear-gradient(90deg, oklch(0.3 0.08 25 / 0.4), oklch(0.25 0.06 25 / 0.3));
+  color: oklch(0.85 0.18 25);
+  border-left-color: oklch(0.7 0.22 25);
+}
+@keyframes mgmt-banner-pulse {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.75; }
+}
+
+/* ─── Audit clickable row affordance ───────────────────────────────── */
+.mgmt-audit-row {
+  cursor: pointer;
+  transition: background-color 0.12s ease;
+}
+.mgmt-audit-row:hover {
+  background: oklch(0.95 0 0 / 0.8) !important;
+}
+.dark .mgmt-audit-row:hover {
+  background: oklch(0.25 0 0 / 0.5) !important;
+}
+.mgmt-audit-row:hover .mgmt-audit-info-icon {
+  opacity: 1;
+  color: oklch(0.6 0.2 250);
+}
+.mgmt-audit-info-icon {
+  opacity: 0.3;
+  transition: opacity 0.12s ease, color 0.12s ease;
+}
+
+/* ─── Force-landscape CSS fallback ──────────────────────────────────── */
+/* Applied to <body> when the user toggles rotate on a mobile portrait
+ * device AND the native Screen Orientation API is unavailable.
+ *
+ * The body is rotated 90deg clockwise and sized to fill the viewport
+ * in landscape orientation. All children (including portaled dialogs)
+ * are rotated together.
+ *
+ * Scrolling: body itself is the scroll container (overflow-y: auto).
+ * Internal h-screen / vh-based heights are overridden to use 100% of
+ * the rotated body so the app fills it correctly. Internal scroll
+ * areas (main, ScrollArea) still work via their own overflow-auto.
+ */
+body.force-landscape-css {
+  transform: rotate(90deg);
+  transform-origin: top left;
+  position: fixed;
+  top: 0;
+  left: 100vw;
+  width: 100vh;
+  height: 100vw;
+  overflow-y: auto;
+  overflow-x: hidden;
+  /* Enable momentum scrolling on iOS */
+  -webkit-overflow-scrolling: touch;
+}
+
+/* Override h-screen → 100% so the app fills the rotated body */
+body.force-landscape-css .h-screen {
+  height: 100% !important;
+  /* Allow internal content to expand beyond viewport if needed,
+     body will scroll. Remove overflow-hidden from the root flex container. */
+  overflow: visible !important;
+}
+
+/* Override vh-based calc heights → 100% based */
+body.force-landscape-css .h-\[calc\(100vh-4rem\)\] {
+  height: calc(100% - 4rem) !important;
+}
+body.force-landscape-css .h-\[calc\(100vh-5rem\)\] {
+  height: calc(100% - 5rem) !important;
+}
+body.force-landscape-css .h-\[calc\(100vh-7rem\)\] {
+  height: calc(100% - 7rem) !important;
+}
+body.force-landscape-css .h-\[calc\(100vh-14rem\)\] {
+  height: calc(100% - 14rem) !important;
+}
+body.force-landscape-css .h-\[calc\(100vh-18rem\)\] {
+  height: calc(100% - 18rem) !important;
+}
+body.force-landscape-css .h-\[calc\(100vh-20rem\)\] {
+  height: calc(100% - 20rem) !important;
+}
+body.force-landscape-css .h-\[calc\(100vh-22rem\)\] {
+  height: calc(100% - 22rem) !important;
+}
+body.force-landscape-css .h-\[calc\(100vh-16rem\)\] {
+  height: calc(100% - 16rem) !important;
+}
+body.force-landscape-css .h-\[calc\(100vh-22rem\)\] {
+  height: calc(100% - 22rem) !important;
+}
+body.force-landscape-css .max-h-\[calc\(100vh-12rem\)\] {
+  max-height: calc(100% - 12rem) !important;
+}
+body.force-landscape-css .max-h-\[25vh\] {
+  max-height: 25% !important;
+}
+body.force-landscape-css .max-h-\[35vh\] {
+  max-height: 35% !important;
+}
+
+/* Override vh-based max-heights on dialogs → % based */
+body.force-landscape-css .max-h-\[50vh\] {
+  max-height: 50% !important;
+}
+body.force-landscape-css .max-h-\[65vh\] {
+  max-height: 65% !important;
+}
+body.force-landscape-css .max-h-\[70vh\] {
+  max-height: 70% !important;
+}
+body.force-landscape-css .max-h-\[85vh\] {
+  max-height: 85% !important;
+}
+body.force-landscape-css .max-h-\[90vh\] {
+  max-height: 90% !important;
+}
+body.force-landscape-css .max-h-\[95vh\] {
+  max-height: 95% !important;
+}
+
+/* Ensure Radix Dialog overlays fill the rotated body correctly.
+   In force-landscape CSS mode, the body is rotated. Radix Dialog portals
+   are children of <body>, so they're rotated too. We use position: absolute
+   (not fixed) so the wrapper is positioned relative to the rotated body,
+   not the viewport. */
+body.force-landscape-css [data-radix-popper-content-wrapper] {
+  position: absolute !important;
+  inset: 0 !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  z-index: 50 !important;
+}
+
+/* Radix Dialog content — in force-landscape CSS mode, the body is rotated.
+   position: fixed elements are positioned relative to the VIEWPORT (not the
+   rotated body), so a fixed dialog would appear in the wrong place.
+   Solution: use position: absolute so the dialog is positioned relative to
+   the rotated body. The body has overflow-y: auto, so the dialog (centered
+   with top/left 50% + translate) will be correctly centered in the rotated
+   landscape view. */
+body.force-landscape-css [data-slot="dialog-content"] {
+  max-height: 90% !important;
+  position: absolute !important;
+  top: 50% !important;
+  left: 50% !important;
+  transform: translate(-50%, -50%) !important;
+}
+
+body.force-landscape-css [data-slot="dialog-overlay"] {
+  position: absolute !important;
+  inset: 0 !important;
+  z-index: 49 !important;
+}
+
+/* In force-landscape CSS mode, the main content area should scroll
+   vertically so the user can scroll up/down through long content
+   (e.g. user cards list, chat messages, terminal output). */
+body.force-landscape-css main {
+  overflow-y: auto !important;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* Any element with overflow-y-auto should be scrollable in force-landscape.
+   touch-action: pan-y ensures touch scrolling works on rotated body. */
+body.force-landscape-css .overflow-y-auto,
+body.force-landscape-css .overflow-auto {
+  -webkit-overflow-scrolling: touch;
+  touch-action: pan-y !important;
+}
+
+/* Horizontal scrollable elements (tabs, tables) — pan-x for touch scrolling */
+body.force-landscape-css .overflow-x-auto {
+  -webkit-overflow-scrolling: touch;
+  touch-action: pan-x !important;
+}
+
+/* ScrollArea components (Radix) should also scroll */
+body.force-landscape-css [data-radix-scroll-area-viewport] {
+  max-height: 100% !important;
+  -webkit-overflow-scrolling: touch;
+  touch-action: pan-y !important;
+}
+
+/* ─── Sidebar drawer in force-landscape mode ────────────────────────── */
+/* The sidebar uses position:fixed inset-y-0, which is relative to the
+   actual viewport. In CSS-rotated body mode, fixed elements are NOT
+   rotated (they're positioned in viewport space). This breaks the
+   sidebar drawer — it would appear in the wrong place.
+   Solution: override the sidebar to use position:absolute so it's
+   relative to the rotated body, and use h-full instead of inset-y-0. */
+body.force-landscape-css [data-sidebar] {
+  position: absolute !important;
+  inset: 0 auto 0 0 !important;
+  height: 100% !important;
+  max-height: 100% !important;
+  overflow-y: auto !important;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* Backdrop for sidebar drawer — also absolute in force-landscape */
+body.force-landscape-css [data-sidebar-backdrop] {
+  position: absolute !important;
+  inset: 0 !important;
+}
+
+

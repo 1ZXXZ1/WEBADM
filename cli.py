@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import socket
 import subprocess
 import sys
 import json
@@ -47,7 +48,7 @@ from urllib.error import HTTPError, URLError
 
 # ── Constants ──────────────────────────────────────────────────────────
 
-VERSION = "pe-a-1.3"
+VERSION = "pe-a-1.4"
 APP_NAME = "webadc"
 WEBADC_NAME = "webadc"
 DEFAULT_HOST = "0.0.0.0"
@@ -144,13 +145,8 @@ def _print_info(msg: str):
 
 def _load_env():
     """Load .env file into os.environ if present."""
-    env_path = ENV_FILE
-    if not env_path.is_file():
-        # Try /etc/webadc/.env first, then /etc/apiadc/.env (legacy compat)
-        env_path = Path("/etc/webadc/.env")
-        if not env_path.is_file():
-            env_path = Path("/etc/apiadc/.env")
-    if env_path.is_file():
+    env_path = _find_env_file()
+    if env_path and env_path.is_file():
         with open(env_path, "r", encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
@@ -165,6 +161,31 @@ def _load_env():
                         val = val[:val.index(" #")].strip()
                     if key and key not in os.environ:
                         os.environ[key] = val
+
+
+def _find_env_file() -> Path:
+    """Find the active .env file.
+
+    Search order (first existing wins):
+      1. ``./.env`` (current working directory — dev mode)
+      2. ``/etc/webadc/.env`` (production, ALT Linux)
+      3. ``/etc/apiadc/.env`` (legacy compat)
+
+    Returns the path if found, else the default ``./.env`` (for writing).
+    """
+    candidates = [
+        Path.cwd() / ".env",
+        Path("/etc/webadc/.env"),
+        Path("/etc/apiadc/.env"),
+    ]
+    for c in candidates:
+        if c.is_file():
+            return c
+    # Default for writing: prefer /etc/webadc/.env if running as root,
+    # otherwise CWD/.env
+    if os.geteuid() == 0 and Path("/etc/webadc").is_dir():
+        return Path("/etc/webadc/.env")
+    return Path.cwd() / ".env"
 
 
 def _get_api_url():
@@ -279,22 +300,36 @@ def _run_script(script_name: str, extra_args: list = None):
     """Run a Python script from the project directory.
 
     In frozen (PyInstaller) mode, scripts are bundled as data files
-    in the temp dir. In source mode, they're next to cli.py.
+    in the temp dir. In source mode, they're in ``app/`` (pe-a-1.4:
+    CLI scripts moved to app/).
     """
     _load_env()
 
+    # v3.3.8 — pe-a-1.4: scripts live in app/ now
     if _FROZEN:
         # In PyInstaller bundle, scripts are in the temp _MEIPASS dir
-        script_path = Path(sys._MEIPASS) / script_name
-        if not script_path.is_file():
-            # Try as package data
-            script_path = BASE_DIR / script_name
+        candidates = [
+            Path(sys._MEIPASS) / script_name,
+            BASE_DIR / script_name,
+            BASE_DIR / "app" / script_name,
+        ]
     else:
-        script_path = BASE_DIR / script_name
+        candidates = [
+            BASE_DIR / "app" / script_name,
+            BASE_DIR / script_name,
+        ]
 
-    if not script_path.is_file():
+    script_path = None
+    for c in candidates:
+        if c.is_file():
+            script_path = c
+            break
+
+    if script_path is None:
         _print_err(f"Скрипт не найден: {script_name}")
-        _print_info(f"Путь: {script_path}")
+        _print_info(f"Искал в:")
+        for c in candidates:
+            _print_info(f"  {c}")
         return 1
 
     # Build argv for the script
@@ -368,6 +403,54 @@ def cmd_run(args):
     ssl_keyfile = os.environ.get("SAMBA_SSL_KEYFILE", "")
     ssl_enabled = bool(ssl_certfile and ssl_keyfile)
     protocol = "HTTPS" if ssl_enabled else "HTTP"
+
+    # v3.3.5 — Pre-flight SSL check with auto-generation.
+    # If cert files are configured but missing, offer to auto-generate
+    # them in /etc/webadc/ssl/ instead of failing.
+    if ssl_enabled:
+        from pathlib import Path as _P
+        cert_ok = _P(ssl_certfile).is_file()
+        key_ok = _P(ssl_keyfile).is_file()
+        if not (cert_ok and key_ok):
+            # Try auto-generation (interactive, or non-interactive with --yes)
+            auto_yes = getattr(args, 'auto_yes', False)
+            if not _ssl_auto_generate_if_missing(auto_yes=auto_yes):
+                # User declined or generation failed — show options
+                _print_err("")
+                _print_err("Альтернативы:")
+                _print_err("  1. sudo webadc ssl generate  (затем sudo webadc run)")
+                _print_err("  2. webadc ssl disable         (запуск на HTTP)")
+                _print_err("  3. SAMBA_SSL_CERTFILE= SAMBA_SSL_KEYFILE= webadc run  (разовый запуск без SSL)")
+                return 1
+            # SSL is now ready — re-read env vars
+            ssl_certfile = os.environ.get("SAMBA_SSL_CERTFILE", ssl_certfile)
+            ssl_keyfile = os.environ.get("SAMBA_SSL_KEYFILE", ssl_keyfile)
+        else:
+            # v3.3.7 — Files exist, but do we have read access?
+            # SSL key files typically have 0600 perms owned by root.
+            # If we're running without sudo, uvicorn will fail with
+            # cryptic PermissionError deep in ssl.create_ssl_context.
+            if not os.access(ssl_certfile, os.R_OK):
+                _print_err(f"✗ Нет прав на чтение сертификата: {ssl_certfile}")
+                _print_err("  Файл существует, но недоступен для чтения.")
+                _print_err("")
+                _print_err("Решения:")
+                _print_err(f"  1. Запустить с sudo: sudo webadc run")
+                _print_err(f"  2. Сменить владельца: sudo chown $USER:$USER {ssl_certfile}")
+                _print_err(f"  3. Или дать права на чтение: sudo chmod 644 {ssl_certfile}")
+                return 1
+            if not os.access(ssl_keyfile, os.R_OK):
+                _print_err(f"✗ Нет прав на чтение SSL ключа: {ssl_keyfile}")
+                _print_err("  Файл существует (права 0600), но вы не root и не владелец.")
+                _print_err("  uvicorn не сможет загрузить сертификат → PermissionError.")
+                _print_err("")
+                _print_err("Решения (в порядке предпочтения):")
+                _print_err(f"  1. Запустить с sudo: sudo webadc run")
+                _print_err(f"  2. Сменить владельца ключа: sudo chown $USER:$USER {ssl_keyfile}")
+                _print_err(f"  3. Дать права на чтение (НЕ рекомендуется для prod): sudo chmod 644 {ssl_keyfile}")
+                _print_err("")
+                _print_info("Подсказка: для production лучше запускать через systemd (sudo systemctl start webadc)")
+                return 1
 
     # Reload: включён по умолчанию, если явно не выключен или не указаны workers
     use_reload = getattr(args, 'reload', True)
@@ -474,14 +557,31 @@ def cmd_start_api(args):
 
     if ssl_enabled:
         _print_info(f"SSL: {protocol} режим (cert={ssl_certfile}, key={ssl_keyfile})")
-        # Verify certificate and key files exist
+        # v3.3.5 — Auto-generate if files missing
         from pathlib import Path as _P
-        if not _P(ssl_certfile).is_file():
-            _print_err(f"SSL сертификат не найден: {ssl_certfile}")
-            return 1
-        if not _P(ssl_keyfile).is_file():
-            _print_err(f"SSL ключ не найден: {ssl_keyfile}")
-            return 1
+        cert_ok = _P(ssl_certfile).is_file()
+        key_ok = _P(ssl_keyfile).is_file()
+        if not (cert_ok and key_ok):
+            if not _ssl_auto_generate_if_missing():
+                _print_err("")
+                _print_err("Альтернативы:")
+                _print_err("  1. sudo webadc ssl generate")
+                _print_err("  2. webadc ssl disable")
+                return 1
+            ssl_certfile = os.environ.get("SAMBA_SSL_CERTFILE", ssl_certfile)
+            ssl_keyfile = os.environ.get("SAMBA_SSL_KEYFILE", ssl_keyfile)
+        else:
+            # v3.3.7 — Check read access (key has 0600 perms)
+            if not os.access(ssl_certfile, os.R_OK) or not os.access(ssl_keyfile, os.R_OK):
+                _print_err("✗ Нет прав на чтение SSL сертификата/ключа.")
+                _print_err(f"  cert: {ssl_certfile}")
+                _print_err(f"  key:  {ssl_keyfile}")
+                _print_err("")
+                _print_err("Решения:")
+                _print_err("  1. Запустить через systemd: sudo systemctl start webadc")
+                _print_err("  2. Или с sudo: sudo webadc start")
+                _print_err(f"  3. Или сменить владельца: sudo chown $USER:$USER {ssl_certfile} {ssl_keyfile}")
+                return 1
     else:
         if ssl_certfile or ssl_keyfile:
             _print_warn("SSL: указан только один из SSL_CERTFILE/SSL_KEYFILE — HTTPS не активирован")
@@ -1161,245 +1261,466 @@ def cmd_sdb(args):
         sys.argv = old_argv
 
 
-# ── DB Command (JSON file storage management) ────────────────────────
+# ── SSL Command (v3.3.4) — manage HTTPS certificates ─────────────────
 
-def cmd_db(args):
-    """Управление JSON-файловым хранилищем (app.db).
+def cmd_ssl(args):
+    """Управление SSL сертификатами для HTTPS.
 
     Подкоманды:
-      db stats             — Статистика всех коллекций
-      db list              — Список коллекций
-      db keys              — Список API-ключей (кеш из PostgreSQL)
-      db audit             — Последние записи аудита (кеш с IP)
-      db tasks             — Список задач (JSON коллекция 'tasks')
-      db templates         — Список шаблонов (JSON коллекция 'templates')
-      db sync              — Синхронизировать кеш из PostgreSQL
-      db show <collection> <id>  — Показать запись
-      db purge <collection>      — Удалить все записи в коллекции
-      db vacuum            — Удалить временные файлы
-      db flush             — Сбросить in-memory кеш
+      ssl generate [--host NAME] [--out DIR]   сгенерировать self-signed
+      ssl check                                  проверить текущую конфигурацию
+      ssl disable                                отключить HTTPS (заккоментировать в .env)
+      ssl enable <cert> <key>                    включить HTTPS с указанными файлами
     """
-    _load_env()
-    _print_header("DB — JSON File Storage")
+    subcmd = args.ssl_cmd
 
-    # Добавляем пути для импорта app.db
-    app_dir = str(BASE_DIR / "app")
-    if app_dir not in sys.path:
-        sys.path.insert(0, app_dir)
-    base_dir_str = str(BASE_DIR)
-    if base_dir_str not in sys.path:
-        sys.path.insert(0, base_dir_str)
+    if subcmd == "generate":
+        return _ssl_generate(args)
+    if subcmd == "check":
+        return _ssl_check(args)
+    if subcmd == "disable":
+        return _ssl_disable(args)
+    if subcmd == "enable":
+        return _ssl_enable(args)
+    _print_err(f"Неизвестная подкоманда ssl: {subcmd}")
+    return 1
+
+
+def _ssl_generate(args):
+    """Generate a self-signed SSL certificate (RSA 2048, 365 days).
+
+    v3.3.5 — Default output dir is /etc/webadc/ssl/ (matches the
+    production deployment layout). Override via --out.
+    """
+    import subprocess
+
+    host = args.host or os.environ.get("SAMBA_SERVER", "") or socket.gethostname()
+    # v3.3.5 — Default to /etc/webadc/ssl/ (production layout)
+    out_dir = args.out or "/etc/webadc/ssl"
+    cert_path = os.path.join(out_dir, "apiadc.crt")
+    key_path = os.path.join(out_dir, "apiadc.key")
+
+    # Ensure directory exists (with parents)
+    os.makedirs(out_dir, exist_ok=True)
+
+    # If files exist, ask before overwriting (unless --force)
+    if (os.path.exists(cert_path) or os.path.exists(key_path)) and not getattr(args, 'force', False):
+        _print_warn(f"Файлы уже существуют:")
+        if os.path.exists(cert_path):
+            _print_warn(f"  {cert_path}")
+        if os.path.exists(key_path):
+            _print_warn(f"  {key_path}")
+        _print_info("Используйте --force для перезаписи")
+        return 1
+
+    # Build openssl command
+    cmd = [
+        "openssl", "req", "-x509", "-newkey", "rsa:2048",
+        "-keyout", key_path,
+        "-out", cert_path,
+        "-days", "365",
+        "-nodes",
+        "-subj", f"/CN={host}",
+        "-addext", f"subjectAltName=DNS:{host},DNS:localhost,IP:127.0.0.1",
+    ]
+    _print_info(f"Генерация self-signed сертификата для {host}...")
+    _print_info(f"  cert: {cert_path}")
+    _print_info(f"  key:  {key_path}")
+    _print_info(f"  Команда: {' '.join(cmd)}")
+    print()
 
     try:
-        from app import db as jsondb
-    except ImportError as e:
-        _print_err(f"Не удалось импортировать app.db: {e}")
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            _print_err(f"openssl failed (rc={result.returncode}):")
+            _print_err(result.stderr)
+            return 1
+        # Set restrictive permissions on key
+        os.chmod(key_path, 0o600)
+        _print_ok(f"Сертификат создан:")
+        _print_ok(f"  {cert_path}")
+        _print_ok(f"  {key_path}")
+        print()
+
+        # v3.3.5 — Auto-enable in .env if SSL is not yet configured
+        try:
+            env_path = _find_env_file()
+            if env_path.is_file():
+                with open(env_path) as f:
+                    env_content = f.read()
+                # Check if SSL_CERTFILE is missing or commented
+                import re
+                cert_match = re.search(r"^SAMBA_SSL_CERTFILE=\S", env_content, re.MULTILINE)
+                if not cert_match:
+                    _print_info(f"Авто-включение HTTPS в {env_path}...")
+                    # Use _ssl_enable logic
+                    class _Args:
+                        pass
+                    a = _Args()
+                    a.cert = cert_path
+                    a.key = key_path
+                    _ssl_enable(a)
+        except Exception as exc:
+            _print_warn(f"Не удалось авто-включить HTTPS в .env: {exc}")
+            _print_info(f"Вручную добавьте в .env:")
+            _print_info(f"  SAMBA_SSL_CERTFILE={cert_path}")
+            _print_info(f"  SAMBA_SSL_KEYFILE={key_path}")
+
+        print()
+        _print_info("Запустите сервер:")
+        _print_info("  webadc run")
+        return 0
+    except FileNotFoundError:
+        _print_err("openssl не найден. Установите: apt-get install openssl")
         return 1
 
-    subcmd = getattr(args, "db_cmd", None)
 
-    if subcmd == "stats":
-        stats = jsondb.full_stats()
-        con = _console()
-        if con:
-            con.print(f"\n[bold]Директория:[/bold] {stats['db_dir']}")
-            con.print(f"[bold]Всего записей:[/bold] {stats['total_records']}")
-            con.print(f"[bold]Общий размер:[/bold] {stats['total_size_bytes']} байт\n")
-            if stats["collections"]:
-                tbl = Table(title="Коллекции", box=box.ROUNDED)
-                tbl.add_column("Коллекция", style="cyan")
-                tbl.add_column("Записей", justify="right")
-                tbl.add_column("Размер", justify="right")
-                tbl.add_column("Старейшая")
-                tbl.add_column("Новейшая")
-                for name, s in sorted(stats["collections"].items()):
-                    tbl.add_row(
-                        name,
-                        str(s["count"]),
-                        f"{s['size_bytes']} B",
-                        s.get("oldest", "—")[:19] if s.get("oldest") else "—",
-                        s.get("newest", "—")[:19] if s.get("newest") else "—",
-                    )
-                con.print(tbl)
-            else:
-                con.print("[dim]Нет коллекций[/dim]")
-        else:
-            print(json.dumps(stats, indent=2, ensure_ascii=False))
+def _ssl_auto_generate_if_missing(auto_yes: bool = False) -> bool:
+    """Auto-generate SSL cert if .env has SSL_ paths but files don't exist.
 
-    elif subcmd == "list":
-        collections = jsondb.list_collections()
-        con = _console()
-        if con:
-            if collections:
-                for c in collections:
-                    cnt = jsondb.count(c)
-                    con.print(f"  {c}  ({cnt} записей)")
-            else:
-                con.print("[dim]Нет коллекций[/dim]")
-        else:
-            for c in collections:
-                print(f"{c} ({jsondb.count(c)})")
+    v3.3.5 — Called from cmd_run before launching uvicorn. If SSL is
+    enabled in .env but cert/key files are missing, this function:
+      1. Asks the user for confirmation (or proceeds if auto_yes=True)
+      2. Generates self-signed cert at /etc/webadc/ssl/
+      3. Updates .env to point to the new files
 
-    elif subcmd == "keys":
-        keys = jsondb.list_records("keys", sort_by="key_prefix", reverse=False)
-        con = _console()
-        if con:
-            if keys:
-                tbl = Table(title="API Keys (cache)", box=box.ROUNDED)
-                tbl.add_column("Prefix", style="cyan")
-                tbl.add_column("Name")
-                tbl.add_column("Role")
-                tbl.add_column("Active")
-                tbl.add_column("User ID")
-                tbl.add_column("Last Used")
-                for k in keys:
-                    tbl.add_row(
-                        k.get("key_prefix", ""),
-                        k.get("name", ""),
-                        k.get("role", ""),
-                        "✓" if k.get("is_active") else "✗",
-                        str(k.get("user_id", "")),
-                        (k.get("last_used_at") or "—")[:19],
-                    )
-                con.print(tbl)
-            else:
-                con.print("[dim]Нет закешированных ключей. Запустите [bold]webadc db sync[/bold][/dim]")
-        else:
-            print(json.dumps(keys, indent=2, ensure_ascii=False))
+    Returns True if SSL is now ready (or was already), False if user
+    declined or generation failed.
+    """
+    ssl_certfile = os.environ.get("SAMBA_SSL_CERTFILE", "")
+    ssl_keyfile = os.environ.get("SAMBA_SSL_KEYFILE", "")
+    if not (ssl_certfile and ssl_keyfile):
+        return True  # SSL not enabled, nothing to do
 
-    elif subcmd == "audit":
-        limit = getattr(args, "limit", 20)
-        records = jsondb.list_records("audit", sort_by="timestamp", reverse=True, limit=limit)
-        con = _console()
-        if con:
-            if records:
-                tbl = Table(title=f"Audit Log (cache, last {limit})", box=box.ROUNDED)
-                tbl.add_column("Time", style="cyan")
-                tbl.add_column("IP")
-                tbl.add_column("Action")
-                tbl.add_column("Endpoint")
-                tbl.add_column("User ID")
-                for r in records:
-                    tbl.add_row(
-                        (r.get("timestamp") or "—")[:19],
-                        r.get("ip_address", "—"),
-                        r.get("action", "—")[:30],
-                        r.get("endpoint", "—")[:40],
-                        str(r.get("user_id", "—")),
-                    )
-                con.print(tbl)
-            else:
-                con.print("[dim]Нет записей аудита. Запустите [bold]webadc db sync[/bold][/dim]")
-        else:
-            print(json.dumps(records, indent=2, ensure_ascii=False))
+    from pathlib import Path
+    cert_exists = Path(ssl_certfile).is_file()
+    key_exists = Path(ssl_keyfile).is_file()
+    if cert_exists and key_exists:
+        return True  # All good
 
-    elif subcmd == "tasks":
-        records = jsondb.list_records("tasks", sort_by="created_at", reverse=True)
-        con = _console()
-        if con:
-            if records:
-                tbl = Table(title="Tasks", box=box.ROUNDED)
-                tbl.add_column("ID", style="cyan")
-                tbl.add_column("Name")
-                tbl.add_column("Blocks", justify="right")
-                tbl.add_column("Tags")
-                tbl.add_column("Created")
-                for r in records:
-                    tbl.add_row(
-                        r.get("id", ""),
-                        r.get("name", ""),
-                        str(len(r.get("blocks", []))),
-                        ", ".join(r.get("tags", [])),
-                        (r.get("created_at") or "—")[:19],
-                    )
-                con.print(tbl)
-            else:
-                con.print("[dim]Нет задач[/dim]")
-        else:
-            print(json.dumps(records, indent=2, ensure_ascii=False))
+    # Files missing — offer to auto-generate
+    _print_warn("SSL сертификат/ключ прописаны в .env, но файлов нет:")
+    if not cert_exists:
+        _print_warn(f"  ✗ {ssl_certfile}")
+    if not key_exists:
+        _print_warn(f"  ✗ {ssl_keyfile}")
+    print()
 
-    elif subcmd == "templates":
-        records = jsondb.list_records("templates", sort_by="category", reverse=False)
-        con = _console()
-        if con:
-            if records:
-                tbl = Table(title="Templates", box=box.ROUNDED)
-                tbl.add_column("ID", style="cyan")
-                tbl.add_column("Name")
-                tbl.add_column("Category")
-                tbl.add_column("Builtin")
-                tbl.add_column("Uses", justify="right")
-                for r in records:
-                    tbl.add_row(
-                        r.get("id", ""),
-                        r.get("name", ""),
-                        r.get("category", ""),
-                        "✓" if r.get("is_builtin") else "✗",
-                        str(r.get("usage_count", 0)),
-                    )
-                con.print(tbl)
-            else:
-                con.print("[dim]Нет шаблонов[/dim]")
-        else:
-            print(json.dumps(records, indent=2, ensure_ascii=False))
+    # Default location for new cert
+    default_dir = "/etc/webadc/ssl"
+    default_cert = os.path.join(default_dir, "apiadc.crt")
+    default_key = os.path.join(default_dir, "apiadc.key")
 
-    elif subcmd == "sync":
-        _print_header("DB — Sync from PostgreSQL")
-        results = jsondb.sync_from_postgresql()
-        con = _console()
-        if con:
-            for coll, cnt in results.items():
-                con.print(f"  {coll}: {cnt} записей синхронизировано")
-        else:
-            print(json.dumps(results, indent=2, ensure_ascii=False))
+    # If running as root, ask; if not, we can't write to /etc
+    if os.geteuid() != 0:
+        _print_err("Нужны права root для генерации сертификата в /etc/webadc/ssl/")
+        _print_err("Запустите: sudo webadc run")
+        return False
 
-    elif subcmd == "show":
-        collection = getattr(args, "collection", None)
-        record_id = getattr(args, "record_id", None)
-        if not collection or not record_id:
-            _print_err("Укажите коллекцию и ID: webadc db show <collection> <id>")
-            return 1
-        record = jsondb.get(collection, record_id)
-        if not record:
-            _print_err(f"Запись {collection}/{record_id} не найдена")
-            return 1
-        print(json.dumps(record, indent=2, ensure_ascii=False))
-
-    elif subcmd == "purge":
-        collection = getattr(args, "collection", None)
-        if not collection:
-            _print_err("Укажите коллекцию: webadc db purge <collection>")
-            return 1
-        count = jsondb.purge_collection(collection)
-        con = _console()
-        if con:
-            con.print(f"[bold red]Удалено {count} записей[/bold red] из коллекции '{collection}'")
-        else:
-            print(f"Purged {count} records from '{collection}'")
-
-    elif subcmd == "vacuum":
-        result = jsondb.vacuum()
-        con = _console()
-        if con:
-            con.print(f"Удалено .tmp файлов: {result['tmp_files']}")
-            con.print(f"Удалено пустых директорий: {result['empty_dirs']}")
-        else:
-            print(json.dumps(result, indent=2))
-
-    elif subcmd == "flush":
-        jsondb.flush_cache()
-        con = _console()
-        if con:
-            con.print("[green]In-memory кеш сброшен[/green]")
-        else:
-            print("Cache flushed")
-
+    # Interactive prompt (skip if --yes)
+    if not auto_yes:
+        try:
+            ans = input(f"Сгенерировать self-signed сертификат в {default_dir}/? [Y/n] ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            ans = "n"
+        if ans in ("n", "no"):
+            _print_err("Отменено пользователем. SSL не настроен — сервер не запустится.")
+            _print_err("Альтернативы:")
+            _print_err("  1. sudo webadc ssl generate  (затем webadc run)")
+            _print_err("  2. webadc ssl disable         (запуск на HTTP)")
+            return False
     else:
-        _print_err(f"Неизвестная подкоманда db: {subcmd}")
-        _print_err("Используйте: webadc db {stats|list|keys|audit|tasks|templates|sync|show|purge|vacuum|flush}")
+        _print_info(f"--yes → авто-генерация в {default_dir}/ без подтверждения")
+
+    # Generate
+    _print_info(f"Генерация self-signed сертификата в {default_dir}/...")
+    import subprocess
+    host = os.environ.get("SAMBA_SERVER", "") or socket.gethostname()
+
+    os.makedirs(default_dir, exist_ok=True)
+
+    cmd = [
+        "openssl", "req", "-x509", "-newkey", "rsa:2048",
+        "-keyout", default_key,
+        "-out", default_cert,
+        "-days", "365",
+        "-nodes",
+        "-subj", f"/CN={host}",
+        "-addext", f"subjectAltName=DNS:{host},DNS:localhost,IP:127.0.0.1",
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            _print_err(f"openssl failed: {result.stderr}")
+            return False
+        os.chmod(default_key, 0o600)
+    except FileNotFoundError:
+        _print_err("openssl не найден. Установите: apt-get install openssl")
+        return False
+
+    _print_ok(f"Сертификат создан: {default_cert}")
+    _print_ok(f"Ключ создан: {default_key}")
+
+    # Update .env to point to the new files
+    env_path = _find_env_file()
+    if env_path.is_file():
+        try:
+            with open(env_path) as f:
+                content = f.read()
+            import re
+            new_cert_line = f"SAMBA_SSL_CERTFILE={default_cert}"
+            new_key_line = f"SAMBA_SSL_KEYFILE={default_key}"
+            content = re.sub(r"^#?\s*SAMBA_SSL_CERTFILE=.*$", new_cert_line, content, flags=re.MULTILINE)
+            content = re.sub(r"^#?\s*SAMBA_SSL_KEYFILE=.*$", new_key_line, content, flags=re.MULTILINE)
+            with open(env_path, "w") as f:
+                f.write(content)
+            _print_ok(f".env обновлён: {env_path}")
+            # Update env vars in current process
+            os.environ["SAMBA_SSL_CERTFILE"] = default_cert
+            os.environ["SAMBA_SSL_KEYFILE"] = default_key
+        except Exception as exc:
+            _print_warn(f"Не удалось обновить .env: {exc}")
+            _print_info(f"Вручную установите:")
+            _print_info(f"  SAMBA_SSL_CERTFILE={default_cert}")
+            _print_info(f"  SAMBA_SSL_KEYFILE={default_key}")
+
+    print()
+    _print_ok("SSL готов — продолжаем запуск сервера...")
+    return True
+
+
+def _ssl_check(args):
+    """Check current SSL configuration."""
+    _load_env()
+    cert = os.environ.get("SAMBA_SSL_CERTFILE", "")
+    key = os.environ.get("SAMBA_SSL_KEYFILE", "")
+    print("SSL Configuration:")
+    print(f"  SAMBA_SSL_CERTFILE = {cert or '(не задан)'}")
+    print(f"  SAMBA_SSL_KEYFILE  = {key or '(не задан)'}")
+    print()
+
+    if not cert and not key:
+        _print_info("HTTPS отключен (SSL_CERTFILE/SSL_KEYFILE не заданы)")
+        return 0
+
+    if cert and not key:
+        _print_warn("Указан только SSL_CERTFILE — HTTPS не активирован (нужен и KEYFILE)")
+        return 1
+    if key and not cert:
+        _print_warn("Указан только SSL_KEYFILE — HTTPS не активирован (нужен и CERTFILE)")
         return 1
 
+    # Both set — check files exist
+    from pathlib import Path
+    issues = 0
+    if not Path(cert).is_file():
+        _print_err(f"✗ Сертификат не найден: {cert}")
+        issues += 1
+    else:
+        _print_ok(f"✓ Сертификат найден: {cert}")
+        # Check it's a valid cert via openssl
+        try:
+            import subprocess
+            r = subprocess.run(
+                ["openssl", "x509", "-in", cert, "-noout", "-subject", "-dates"],
+                capture_output=True, text=True,
+            )
+            if r.returncode == 0:
+                for line in r.stdout.strip().split("\n"):
+                    _print_info(f"    {line}")
+        except FileNotFoundError:
+            pass
+
+    if not Path(key).is_file():
+        _print_err(f"✗ Ключ не найден: {key}")
+        issues += 1
+    else:
+        _print_ok(f"✓ Ключ найден: {key}")
+        # Check permissions (should be 600)
+        import stat
+        mode = stat.S_IMODE(Path(key).stat().st_mode)
+        if mode & 0o077:
+            _print_warn(f"  ⚠ Права на ключ {oct(mode)} — рекомендуется chmod 600")
+        else:
+            _print_ok(f"  ✓ Права на ключ {oct(mode)}")
+        # v3.3.7 — Check read access for current user
+        if os.access(key, os.R_OK):
+            _print_ok(f"  ✓ Доступен для чтения текущим пользователем")
+        else:
+            _print_warn(f"  ⚠ НЕ доступен для чтения текущим пользователем")
+            _print_warn(f"    Если сервер не запускается с PermissionError — запустите через sudo")
+            _print_warn(f"    Или смените владельца: sudo chown $USER:$USER {key}")
+
+    # v3.3.7 — Also check cert readability
+    if Path(cert).is_file() and not os.access(cert, os.R_OK):
+        _print_warn(f"  ⚠ Сертификат НЕ доступен для чтения: {cert}")
+        _print_warn(f"    Решение: sudo chmod 644 {cert}")
+
+    if issues:
+        print()
+        _print_err("SSL конфигурация НЕ валидна — сервер не запустится с HTTPS.")
+        _print_info("Сгенерировать self-signed: sudo webadc ssl generate")
+        _print_info("Отключить HTTPS:           webadc ssl disable")
+        return 1
+
+    print()
+    _print_ok("SSL конфигурация валидна — сервер запустится с HTTPS.")
     return 0
+
+
+def _ssl_disable(args):
+    """Disable HTTPS by commenting out SSL_ lines in .env."""
+    env_path = _find_env_file()
+    if not env_path.is_file():
+        _print_err(f".env не найден: {env_path}")
+        _print_err("Поиск выполнялся в:")
+        _print_err("  1. ./.env (текущая директория)")
+        _print_err("  2. /etc/webadc/.env")
+        _print_err("  3. /etc/apiadc/.env (legacy)")
+        return 1
+
+    _print_info(f"Используется .env: {env_path}")
+    with open(env_path) as f:
+        lines = f.readlines()
+
+    changed = 0
+    new_lines = []
+    for line in lines:
+        stripped = line.lstrip()
+        # Skip already-commented lines
+        if stripped.startswith("#"):
+            new_lines.append(line)
+            continue
+        # Comment out SSL_CERTFILE / SSL_KEYFILE / SSL_KEYFILE_PASSWORD / SSL_CA_CERTS
+        if any(stripped.startswith(prefix) for prefix in
+               ("SAMBA_SSL_CERTFILE", "SAMBA_SSL_KEYFILE",
+                "SAMBA_SSL_KEYFILE_PASSWORD", "SAMBA_SSL_CA_CERTS")):
+            new_lines.append("# " + line)
+            changed += 1
+            _print_info(f"  закомментировано: {line.rstrip()}")
+        else:
+            new_lines.append(line)
+
+    if changed == 0:
+        _print_info("SSL строки не найдены в .env — HTTPS уже отключен")
+        return 0
+
+    with open(env_path, "w") as f:
+        f.writelines(new_lines)
+    _print_ok(f"HTTPS отключен — закомментировано {changed} строк в {env_path}")
+    _print_info("Теперь сервер запустится на HTTP. Перезапустите: webadc run")
+    return 0
+
+
+def _ssl_enable(args):
+    """Enable HTTPS by setting SSL_CERTFILE/SSL_KEYFILE in .env."""
+    if not args.cert or not args.key:
+        _print_err("Требуется --cert и --key:")
+        _print_err('  webadc ssl enable --cert /path/cert.crt --key /path/cert.key')
+        return 1
+
+    from pathlib import Path
+    if not Path(args.cert).is_file():
+        _print_err(f"Сертификат не найден: {args.cert}")
+        return 1
+    if not Path(args.key).is_file():
+        _print_err(f"Ключ не найден: {args.key}")
+        return 1
+
+    env_path = _find_env_file()
+    _print_info(f"Используется .env: {env_path}")
+
+    with open(env_path) as f:
+        content = f.read()
+
+    # Replace existing SSL_CERTFILE / SSL_KEYFILE lines, or append
+    import re
+    new_cert_line = f"SAMBA_SSL_CERTFILE={args.cert}\n"
+    new_key_line = f"SAMBA_SSL_KEYFILE={args.key}\n"
+
+    # Try to replace existing lines (commented or not)
+    content = re.sub(
+        r"^#?\s*SAMBA_SSL_CERTFILE=.*$",
+        new_cert_line.rstrip(),
+        content, flags=re.MULTILINE,
+    )
+    content = re.sub(
+        r"^#?\s*SAMBA_SSL_KEYFILE=.*$",
+        new_key_line.rstrip(),
+        content, flags=re.MULTILINE,
+    )
+
+    # If not found, append
+    if "SAMBA_SSL_CERTFILE=" not in content:
+        content += "\n# v3.3.5 — HTTPS enabled\n" + new_cert_line + new_key_line
+    elif "SAMBA_SSL_KEYFILE=" not in content:
+        content += new_key_line
+
+    with open(env_path, "w") as f:
+        f.write(content)
+
+    _print_ok(f"HTTPS включен в {env_path}:")
+    _print_ok(f"  SAMBA_SSL_CERTFILE={args.cert}")
+    _print_ok(f"  SAMBA_SSL_KEYFILE={args.key}")
+    _print_info("Перезапустите сервер: webadc run")
+    return 0
+
+
+# ── SQLDB Command (delegates to app/cli_sqldb.py, pe-a-1.4) ───────────
+
+def cmd_sqldb(args):
+    """Делегирует в app/cli_sqldb.py (pe-a-1.4 — rich UI, interactive conflicts).
+
+    Все sqldb-команды реализованы в отдельном модуле app/cli_sqldb.py для
+    лучшей maintainability. Этот handler просто транслирует argparse-args
+    в вызов cli_sqldb.main().
+    """
+    import sys
+    try:
+        # v3.3.8 — pe-a-1.4: cli_sqldb moved to app/
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "app"))
+        # Try app/cli_sqldb first, fall back to root for back-compat
+        try:
+            from app.cli_sqldb import main as _sqldb_main
+        except ImportError:
+            import cli_sqldb
+            _sqldb_main = cli_sqldb.main
+    except ImportError as exc:
+        _print_err(f'app/cli_sqldb.py не найден: {exc}')
+        return 1
+
+    # Build argv from argparse Namespace
+    argv = [args.sqldb_cmd]
+    if args.revision_id:
+        argv.append(args.revision_id)
+    if args.sql:
+        argv.append(args.sql)
+    if args.revision_msg:
+        argv.extend(['-m', args.revision_msg])
+    if args.dump_out:
+        argv.extend(['--out', args.dump_out])
+    if args.restore_in:
+        argv.extend(['--in', args.restore_in])
+    # --on-conflict takes precedence over --mode (back-compat)
+    on_conflict = args.on_conflict or args.restore_mode
+    if on_conflict:
+        argv.extend(['--on-conflict', on_conflict])
+    if args.dry_run:
+        argv.append('--dry-run')
+    if args.transfer_from:
+        argv.extend(['--from', args.transfer_from])
+    if args.transfer_to:
+        argv.extend(['--to', args.transfer_to])
+    if args.tables_filter:
+        argv.extend(['--tables', args.tables_filter])
+    # v3.3.6 — for audit/show/purge commands
+    if getattr(args, 'limit', None) and args.sqldb_cmd == 'audit':
+        argv.extend(['--limit', str(args.limit)])
+    if getattr(args, 'auto_yes', False) and args.sqldb_cmd == 'purge':
+        argv.append('--yes')
+
+    return _sqldb_main(argv)
 
 
 # ── Ban management (v1.2.7_ban) ────────────────────────────────────────
@@ -1850,6 +2171,8 @@ build и без systemd. Идеально для разработки — по �
                        help="Выключить auto-reload")
     p_run.add_argument("--debug", action="store_true", help="DEBUG log level")
     p_run.add_argument("--workers", type=int, default=None, help="Количество воркеров (отключает reload)")
+    p_run.add_argument("--yes", "-y", action="store_true", dest="auto_yes",
+                       help="Auto-confirm SSL certificate generation (non-interactive)")
     p_run.set_defaults(func=cmd_run)
 
     # sdb — SDB CLI (SQL-подобный клиент для Samba LDB)
@@ -1883,36 +2206,6 @@ build и без systemd. Идеально для разработки — по �
     p_sdb.add_argument("--no-sudo", action="store_true",
                        help="НЕ использовать sudo")
     p_sdb.set_defaults(func=cmd_sdb)
-
-    # db — JSON file storage management
-    p_db = sub.add_parser("db",
-                          help="Управление JSON-файловым хранилищем (app.db)",
-                          formatter_class=argparse.RawDescriptionHelpFormatter,
-                          epilog="""\
-Подкоманды:
-  webadc db stats                     Статистика всех коллекций
-  webadc db list                      Список коллекций
-  webadc db keys                      API-ключи (кеш из PostgreSQL)
-  webadc db audit [--limit N]         Записи аудита с IP (кеш)
-  webadc db tasks                     Задачи (JSON коллекция 'tasks')
-  webadc db templates                 Шаблоны (JSON коллекция 'templates')
-  webadc db sync                      Синхронизировать кеш из PostgreSQL
-  webadc db show <collection> <id>    Показать конкретную запись
-  webadc db purge <collection>        Удалить все записи в коллекции
-  webadc db vacuum                    Удалить временные файлы
-  webadc db flush                     Сбросить in-memory кеш
-""")
-    p_db.add_argument("db_cmd", choices=[
-        "stats", "list", "keys", "audit", "tasks", "templates",
-        "sync", "show", "purge", "vacuum", "flush",
-    ], help="Подкоманда db")
-    p_db.add_argument("collection", nargs="?", default=None,
-                       help="Имя коллекции (для show/purge)")
-    p_db.add_argument("record_id", nargs="?", default=None,
-                       help="ID записи (для show)")
-    p_db.add_argument("--limit", type=int, default=20,
-                       help="Лимит записей для audit (по умолчанию: 20)")
-    p_db.set_defaults(func=cmd_db)
 
     # ban — Ban / Unban management (v1.2.7_ban)
     p_ban = sub.add_parser("ban",
@@ -1960,6 +2253,175 @@ build и без systemd. Идеально для разработки — по �
     p_ban.add_argument("--older-than-days", dest="purge_days", type=int, default=90,
                        help="Удалить баны старше N дней (для purge, по умолчанию: 90)")
     p_ban.set_defaults(func=cmd_ban)
+
+    # ssl — SSL/HTTPS сертификаты (pe-a-1.4)
+    p_ssl = sub.add_parser(
+        "ssl",
+        help="Управление SSL сертификатами для HTTPS (pe-a-1.4)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""\
+Подкоманды:
+  ssl generate [--host NAME] [--out DIR] [--force]
+                                          Сгенерировать self-signed сертификат
+                                          (default: /etc/webadc/ssl/)
+  ssl check                                Проверить текущую SSL конфигурацию
+  ssl disable                              Отключить HTTPS (закомментировать в .env)
+  ssl enable --cert FILE --key FILE        Включить HTTPS с указанными файлами
+
+Поиск .env: ./  →  /etc/webadc/.env  →  /etc/apiadc/.env (legacy)
+
+Примеры:
+  sudo webadc ssl generate                                       # self-signed в /etc/webadc/ssl/
+  sudo webadc ssl generate --host ad.example.com                 # для конкретного hostname
+  sudo webadc ssl generate --out /etc/ssl                        # в другую директорию
+  webadc ssl check                                               # проверить конфигурацию
+  webadc ssl disable                                             # отключить HTTPS
+  webadc ssl enable --cert /path/c.crt --key /path/c.key         # включить с готовым cert
+
+Auto-mode в webadc run:
+  Если SSL_CERTFILE/SSL_KEYFILE прописаны в .env, но файлов нет —
+  webadc run предложит сгенерировать self-signed автоматически.
+""",
+    )
+    p_ssl.add_argument("ssl_cmd", choices=["generate", "check", "disable", "enable"],
+                       help="Подкоманда ssl")
+    p_ssl.add_argument("--host", default=None,
+                       help="Hostname для сертификата (default: текущий hostname)")
+    p_ssl.add_argument("--out", default=None,
+                       help="Директория вывода (default: /etc/webadc/ssl)")
+    p_ssl.add_argument("--cert", default=None,
+                       help="Путь к сертификату (для enable)")
+    p_ssl.add_argument("--key", default=None,
+                       help="Путь к ключу (для enable)")
+    p_ssl.add_argument("--force", action="store_true",
+                       help="Перезаписать существующие файлы (для generate)")
+    p_ssl.set_defaults(func=cmd_ssl)
+
+    # sqldb — Единый DB-слой (SQLAlchemy + Alembic + DuckDB)
+    p_sqldb = sub.add_parser(
+        "sqldb",
+        help="Единый DB-слой: SQLite/PostgreSQL через DB_URL (pe-a-1.4)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""\
+Подкоманды (pe-a-1.4 — SQLAlchemy + Alembic + DuckDB):
+  webadc sqldb init                       создать схему + seed admin/admin
+  webadc sqldb upgrade                    alembic upgrade head (auto-stamp если init уже создал таблицы)
+  webadc sqldb downgrade <rev>            alembic downgrade <rev>
+  webadc sqldb stamp [rev]                пометить миграцию применённой без SQL (по умолч. head)
+  webadc sqldb revision -m "msg"          alembic revision -m "msg" --autogenerate
+  webadc sqldb current                    текущая применённая миграция
+  webadc sqldb history                    история миграций
+  webadc sqldb shell                       Python REPL с engine, Session, Base, models
+  webadc sqldb info                        показать DB_URL, engine, список таблиц
+  webadc sqldb stats                       количество строк в каждой таблице (DuckDB если доступен)
+  webadc sqldb status                      обзор БД (DB_URL, размер, миграции, top-10 таблиц)
+  webadc sqldb query "SELECT ..."          read-only SQL через DuckDB
+  webadc sqldb show <table> <id>          показать запись по PK
+  webadc sqldb purge <table>              очистить таблицу (с подтверждением)
+  webadc sqldb keys                        список API-ключей
+  webadc sqldb audit [--limit N]          последние записи аудита
+
+Подкоманды pe-a-1.4 — Сериализация (dump/restore/transfer):
+  webadc sqldb dump [--out F] [--tables t1,t2]   Дамп текущей БД в JSONL
+  webadc sqldb dump-info --in F                  Инфо о JSONL-дампе (без БД)
+  webadc sqldb list-dumps                        Список доступных *.jsonl в текущей директории
+  webadc sqldb restore --in F [--on-conflict MODE] [--dry-run]
+                                                   Восстановить из JSONL
+  webadc sqldb transfer --from URL --to URL [--on-conflict MODE] [--tables t1,t2] [--dry-run]
+                                                   Прямое копирование между БД
+  webadc sqldb test-url "URL"                    Проверить подключение к БД (без записи)
+
+--on-conflict MODE (для transfer/restore):
+  ask          спросить интерактивно (по умолчанию)
+  skip         пропустить source-строку
+  overwrite    удалить target-строку, вставить source
+  upsert       UPDATE target-строки значениями из source
+  fail         прервать при первом конфликте
+
+Форматы URL SQLAlchemy:
+  SQLite (отн.)  : sqlite:///app.db
+  SQLite (абс.)  : sqlite:////var/lib/webadc/app.db          ← 4 слеша!
+  PostgreSQL     : postgresql+psycopg2://USER:PASSWORD@HOST:PORT/DBNAME
+  MySQL          : mysql+pymysql://USER:PASSWORD@HOST:PORT/DBNAME
+  DuckDB         : duckdb:///app.duckdb
+
+  ВАЖНО: для PostgreSQL драйвер +psycopg2 ОБЯЗАТЕЛЕН в URL.
+  Спецсимволы в пароле требуют URL-encoding: p@ss → p%40ss
+
+Примеры:
+  webadc sqldb init                       # первый запуск — создаёт app.db + admin/admin
+  webadc sqldb upgrade                    # применить миграции
+  webadc sqldb shell                      # python REPL с engine/Session
+  webadc sqldb query "SELECT COUNT(*) FROM app.mgmt_users"
+
+  # Проверить подключение к PostgreSQL:
+  webadc sqldb test-url "postgresql+psycopg2://samba_api:12345@localhost:5432/samba_api"
+
+  # Backup текущей SQLite в JSONL:
+  webadc sqldb dump --out backup.jsonl
+  webadc sqldb list-dumps                  # какие дампы есть
+  webadc sqldb dump-info --in backup.jsonl
+
+  # Перенос PostgreSQL → SQLite (сначала test-url, потом transfer):
+  webadc sqldb test-url "postgresql+psycopg2://samba_api:12345@localhost:5432/samba_api"
+  webadc sqldb transfer \\
+    --from "postgresql+psycopg2://samba_api:12345@localhost:5432/samba_api" \\
+    --to "sqlite:///app.db"
+
+  # Перенос SQLite → PostgreSQL:
+  webadc sqldb transfer \\
+    --from "sqlite:///app.db" \\
+    --to "postgresql+psycopg2://samba_api:12345@localhost:5432/samba_api"
+
+  # Восстановить из дампа:
+  webadc sqldb restore --in backup.jsonl --mode skip       # не трогать существующие
+  webadc sqldb restore --in backup.jsonl --mode overwrite  # перезаписать
+  webadc sqldb restore --in backup.jsonl --dry-run         # только проверить
+
+  # Только определённые таблицы:
+  webadc sqldb dump --out partial.jsonl --tables mgmt_users,mgmt_roles
+  webadc sqldb transfer --from "sqlite:///app.db" --to "sqlite:///copy.db" --tables mgmt_users
+""",
+    )
+    p_sqldb.add_argument(
+        "sqldb_cmd",
+        choices=["init", "upgrade", "downgrade", "revision", "stamp",
+                 "current", "history", "shell", "info", "stats", "status", "query",
+                 "show", "purge", "keys", "audit",
+                 "dump", "restore", "transfer", "dump-info",
+                 "test-url", "list-dumps"],
+        help="Подкоманда sqldb",
+    )
+    p_sqldb.add_argument("revision_id", nargs="?", default=None,
+                         help="Revision id для downgrade/stamp")
+    p_sqldb.add_argument("-m", "--message", dest="revision_msg", default=None,
+                         help="Сообщение для новой миграции (revision)")
+    p_sqldb.add_argument("sql", nargs="?", default=None,
+                         help="SQL для query (в кавычках)")
+    # dump / restore / transfer options
+    p_sqldb.add_argument("--out", dest="dump_out", default=None,
+                         help="Путь выходного файла для dump (по умолчанию app_db_dump_<ts>.jsonl)")
+    p_sqldb.add_argument("--in", dest="restore_in", default=None,
+                         help="Путь JSONL-файла для restore")
+    p_sqldb.add_argument("--mode", dest="restore_mode", default=None,
+                         choices=["skip", "overwrite", "upsert", "fail"],
+                         help="Алиас для --on-conflict (back-compat)")
+    p_sqldb.add_argument("--on-conflict", dest="on_conflict", default=None,
+                         choices=["ask", "skip", "overwrite", "upsert", "fail"],
+                         help="Поведение при PK-конфликте: ask|skip|overwrite|upsert|fail (pe-a-1.4)")
+    p_sqldb.add_argument("--dry-run", dest="dry_run", action="store_true",
+                         help="Только проверить, без записи (для restore/transfer)")
+    p_sqldb.add_argument("--from", dest="transfer_from", default=None,
+                         help="Source URL для transfer (например postgresql+psycopg2://...)")
+    p_sqldb.add_argument("--to", dest="transfer_to", default=None,
+                         help="Target URL для transfer")
+    p_sqldb.add_argument("--tables", dest="tables_filter", default=None,
+                         help="Фильтр таблиц через запятую (для dump/transfer)")
+    p_sqldb.add_argument("--limit", type=int, default=20,
+                         help="Лимит записей для audit (по умолчанию: 20)")
+    p_sqldb.add_argument("--yes", "-y", action="store_true", dest="auto_yes",
+                         help="Auto-confirm destructive actions (purge)")
+    p_sqldb.set_defaults(func=cmd_sqldb)
 
     args = parser.parse_args()
 

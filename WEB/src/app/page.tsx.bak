@@ -1,0 +1,107 @@
+'use client';
+
+import React, { useState } from 'react';
+import '@/lib/i18n';
+import { useAuthStore } from '@/stores/auth-store';
+import LoginPage from '@/components/auth/LoginPage';
+import MainLayout, { type PageId } from '@/components/layout/MainLayout';
+import DashboardPage from '@/components/dashboard/DashboardPage';
+import UsersPage from '@/components/users/UsersPage';
+import GroupsPage from '@/components/groups/GroupsPage';
+import ComputersPage from '@/components/computers/ComputersPage';
+import GPOPage from '@/components/gpo/GPOPage';
+import DomainPage from '@/components/domain/DomainPage';
+import ManagementPage from '@/components/management/ManagementPage';
+import DNSPage from '@/components/dns/DNSPage';
+import ShellTerminal from '@/components/shell/ShellTerminal';
+import ETLBuilder from '@/components/etl/ETLBuilder';
+import AuditPage from '@/components/audit/AuditPage';
+import { Card, CardContent } from '@/components/ui/card';
+import { Phone, FolderTree } from 'lucide-react';
+import { RequirePermission } from '@/components/permissions/RequirePermission';
+
+// Placeholder pages for sections without full implementation
+function PlaceholderPage({ title, icon: Icon, permission }: { title: string; icon: React.ElementType; permission: string }) {
+  return (
+    <RequirePermission permission={permission}>
+      <Card>
+        <CardContent className="flex flex-col items-center justify-center py-16">
+          <Icon className="w-12 h-12 text-muted-foreground/30 mb-4" />
+          <h2 className="text-xl font-semibold mb-2">{title}</h2>
+          <p className="text-sm text-muted-foreground">This section is available. Connect to a Samba AD DC server to manage it.</p>
+        </CardContent>
+      </Card>
+    </RequirePermission>
+  );
+}
+
+function useMounted() {
+  const [mounted, setMounted] = useState(false);
+  React.useEffect(() => {
+    const savedTheme = localStorage.getItem('samba-theme');
+    if (savedTheme === 'light') {
+      document.documentElement.classList.remove('dark');
+    } else {
+      document.documentElement.classList.add('dark');
+    }
+    setMounted(true);
+  }, []);
+  return mounted;
+}
+
+export default function Home() {
+  const { isAuthenticated } = useAuthStore();
+  const [currentPage, setCurrentPage] = useState<PageId>('dashboard');
+  const mounted = useMounted();
+
+  if (!mounted) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-gray-950">
+        <div className="animate-pulse text-gray-600">Loading...</div>
+      </div>
+    );
+  }
+
+  if (!isAuthenticated) {
+    return <LoginPage />;
+  }
+
+  const renderPage = () => {
+    switch (currentPage) {
+      case 'dashboard':
+        return <DashboardPage />;
+      case 'users':
+        return <UsersPage />;
+      case 'groups':
+        return <GroupsPage />;
+      case 'computers':
+        return <ComputersPage />;
+      case 'contacts':
+        return <PlaceholderPage title="Contacts" icon={Phone} permission="contact.list" />;
+      case 'ou':
+        return <PlaceholderPage title="Organizational Units" icon={FolderTree} permission="ou.list" />;
+      case 'dns':
+        return <DNSPage />;
+      case 'gpo':
+        return <GPOPage />;
+      case 'domain':
+        return <DomainPage />;
+      case 'shell':
+        return <ShellTerminal />;
+      case 'tasks':
+        return <ETLBuilder />;
+      case 'audit':
+        return <AuditPage />;
+      case 'management':
+        return <ManagementPage />;
+      default:
+        return <DashboardPage />;
+    }
+  };
+
+  return (
+    <MainLayout currentPage={currentPage} onNavigate={setCurrentPage}>
+      {renderPage()}
+    </MainLayout>
+  );
+}

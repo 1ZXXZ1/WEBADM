@@ -103,6 +103,33 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     except Exception as exc:
         logger.warning("Failed to initialize management database: %s", exc)
 
+    # v3.0: Initialize unified SQLAlchemy layer (SQLite via DB_URL by default).
+    # This creates all tables from app.models_sqla + seeds the default
+    # admin/admin user and built-in roles. Idempotent — safe to call on
+    # every startup. For schema migrations use `alembic upgrade head`.
+    try:
+        from app.db_sqlalchemy import init_db as _sqla_init_db
+        _sqla_init_db(seed=True)
+        from app.config import get_settings as _get_settings
+        _s = _get_settings()
+        logger.info(
+            "SQLAlchemy layer initialized (DB_URL=%s, seed=admin/admin)",
+            getattr(_s, "DB_URL", "sqlite:///app.db"),
+        )
+    except Exception as exc:
+        logger.warning("Failed to initialize SQLAlchemy layer: %s", exc)
+
+    # v3.0: Best-effort DuckDB analytics layer. Auto-disables if the
+    # main DB is not SQLite or duckdb is not installed.
+    try:
+        from app.db_analytics import is_enabled as _duck_enabled, stats as _duck_stats
+        if _duck_enabled():
+            logger.info("DuckDB analytics layer enabled: %s", _duck_stats())
+        else:
+            logger.info("DuckDB analytics layer disabled (non-SQLite DB_URL or duckdb missing)")
+    except Exception as exc:
+        logger.warning("Failed to initialize DuckDB analytics layer: %s", exc)
+
     # v1.2.7_ban: Initialize ban table schema (mgmt_bans).
     # Safe no-op if mgmt_db pool failed to initialize — ban features
     # will simply return 503 when called.

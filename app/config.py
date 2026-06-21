@@ -269,6 +269,50 @@ class Settings(BaseSettings):
         ),
     )
 
+    # ── Unified DB URL (v3.0 — SQLAlchemy + Alembic) ─────────────────
+    # One string, one truth. SQLAlchemy accepts:
+    #   sqlite:///app.db                          (default, dev)
+    #   sqlite:////var/lib/webadc/app.db          (prod absolute path)
+    #   postgresql+psycopg2://user:pwd@host/db    (legacy PG)
+    #   mysql+pymysql://user:pwd@host/db
+    #   duckdb:///app.duckdb                       (analytics-only)
+    # Backward-compat: if empty, falls back to legacy SAMBA_DB_* settings
+    # below, then to the hardcoded SQLite default.
+    DB_URL: str = Field(
+        default="sqlite:///DB/app.db",
+        validation_alias=AliasChoices("DB_URL", "SAMBA_DB_URL"),
+        description=(
+            "SQLAlchemy database URL. Single source of truth for the new "
+            "unified ORM layer (app.db_sqlalchemy, app.models_sqla). "
+            "Examples: 'sqlite:///DB/app.db' (default, in DB/ subdir), "
+            "'sqlite:////var/lib/webadc/app.db' (absolute path), "
+            "'postgresql+psycopg2://samba_api:pwd@localhost/samba_api'. "
+            "Environment: DB_URL (no SAMBA_ prefix) or SAMBA_DB_URL."
+        ),
+    )
+    DB_ECHO: bool = Field(
+        default=False,
+        description="If True, SQLAlchemy logs every SQL statement (DEBUG).",
+    )
+    DB_POOL_SIZE: int = Field(
+        default=5,
+        description="SQLAlchemy connection pool size (ignored for SQLite).",
+    )
+    DB_POOL_MAX_OVERFLOW: int = Field(
+        default=10,
+        description="SQLAlchemy pool overflow (ignored for SQLite).",
+    )
+    DB_DUCKDB_ENABLED: bool = Field(
+        default=True,
+        description=(
+            "Enable DuckDB read-only analytics layer over the main DB. "
+            "DuckDB ATTACHes app.db in read-only mode and exposes "
+            "app.db_analytics.query() for analytical SQL (dashboards, "
+            "audit aggregations). Disabled automatically when DB_URL is "
+            "not a SQLite file."
+        ),
+    )
+
     # ── JWT Authentication (v2.7) ────────────────────────────────────
     JWT_SECRET_KEY: str = Field(
         default="",

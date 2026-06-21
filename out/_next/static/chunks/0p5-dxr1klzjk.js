@@ -1,1 +1,0 @@
-(globalThis.TURBOPACK||(globalThis.TURBOPACK=[])).push(["object"==typeof document?document.currentScript:void 0,82783,i=>{"use strict";var t=i.i(51436);i.i(9165),i.s(["chatFilesApi",()=>t.chatFilesApi])}]);

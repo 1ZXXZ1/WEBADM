@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Auto-generated TLS certificates
+cert.pem
+key.pem
+
+# Environment
+.env
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Static content is regenerated from Next.js build
+static/

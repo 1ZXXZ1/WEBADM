@@ -1345,11 +1345,11 @@ async def sdb_export_endpoint(
 
         # Build download URL with server base
         download_url = f"/api/v1/sdb/exports/{zip_name}"
-        download_url_full = f"http://127.0.0.1:8099/api/v1/sdb/exports/{zip_name}"
+        download_url_full = f"https://127.0.0.1:8099/api/v1/sdb/exports/{zip_name}"
         try:
             from app.config import get_settings
             settings = get_settings()
-            api_base = getattr(settings, "AI_API_BASE", "http://127.0.0.1:8099")
+            api_base = getattr(settings, "AI_API_BASE", "https://127.0.0.1:8099")
             download_url_full = f"{api_base}/api/v1/sdb/exports/{zip_name}"
         except Exception:
             pass

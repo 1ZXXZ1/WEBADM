@@ -500,10 +500,10 @@ async def generate_report(
     try:
         from app.config import get_settings
         settings = get_settings()
-        api_base = getattr(settings, "AI_API_BASE", "http://127.0.0.1:8099")
+        api_base = getattr(settings, "AI_API_BASE", "https://127.0.0.1:8099")
         download_url_full = f"{api_base}/api/v1/report/exports/{filename}"
     except Exception:
-        download_url_full = f"http://127.0.0.1:8099/api/v1/report/exports/{filename}"
+        download_url_full = f"https://127.0.0.1:8099/api/v1/report/exports/{filename}"
 
     # Write summary sheet (replace the default active sheet)
     # Remove the default "Sheet" that openpyxl creates

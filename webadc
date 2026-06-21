@@ -1,0 +1,73 @@
+#!/bin/bash
+# webadc — wrapper script for WEBADC CLI (pe-a-1.4)
+#
+# Устанавливается как /usr/local/bin/webadc чтобы можно было вызывать
+# из любого места: `webadc start`, `webadc sqldb init`, и т.д.
+#
+# Установка:
+#   sudo cp webadc /usr/local/bin/webadc
+#   sudo chmod +x /usr/local/bin/webadc
+#
+# Или через install:
+#   sudo install -m 755 webadc /usr/local/bin/webadc
+
+# ── Определение расположения cli.py ────────────────────────────────────
+# Сначала проверяем /opt/webadc (стандартное расположение)
+# Затем /usr/share/webadc
+# Затем CWD (для dev-режима)
+# Затем каталог из symlink (если /usr/local/bin/webadc — symlink)
+
+# Если запущены через symlink, ищем реальный путь
+SCRIPT_PATH="$(readlink -f "$0" 2>/dev/null || echo "$0")"
+SCRIPT_DIR="$(dirname "$SCRIPT_PATH")"
+
+# Candidate locations
+CANDIDATES=(
+    "/opt/webadc"
+    "/usr/share/webadc"
+    "$SCRIPT_DIR"
+    "$(pwd)"
+)
+
+# Find cli.py
+CLI_PY=""
+for dir in "${CANDIDATES[@]}"; do
+    if [ -f "$dir/cli.py" ]; then
+        CLI_PY="$dir/cli.py"
+        break
+    fi
+done
+
+if [ -z "$CLI_PY" ]; then
+    echo "Ошибка: cli.py не найден." >&2
+    echo "Искал в:" >&2
+    for dir in "${CANDIDATES[@]}"; do
+        echo "  $dir/cli.py" >&2
+    done
+    echo "" >&2
+    echo "Установите webadc в стандартное расположение:" >&2
+    echo "  sudo cp -r . /opt/webadc" >&2
+    echo "  sudo ln -sf /opt/webadc/webadc /usr/local/bin/webadc" >&2
+    exit 1
+fi
+
+# ── Выбор Python интерпретатора ────────────────────────────────────────
+# Приоритет: python3.14 (явно предпочтительный), затем python3, python
+PYTHON=""
+for py in python3.14 python3.13 python3.12 python3 python; do
+    if command -v "$py" >/dev/null 2>&1; then
+        PYTHON="$py"
+        break
+    fi
+done
+
+if [ -z "$PYTHON" ]; then
+    echo "Ошибка: Python не найден. Установите Python 3.12+." >&2
+    exit 1
+fi
+
+# ── Переход в каталог cli.py (чтобы .env нашёлся) ──────────────────────
+cd "$(dirname "$CLI_PY")" || exit 1
+
+# ── Запуск ─────────────────────────────────────────────────────────────
+exec "$PYTHON" "$CLI_PY" "$@"

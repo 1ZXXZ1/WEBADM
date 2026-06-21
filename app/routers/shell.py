@@ -507,7 +507,7 @@ async def exec_script_file(
           -F "file=@run.sh" \\
           -F "shell=bash" \\
           -F "auto_delete=true" \\
-          http://localhost:8099/api/v1/shell/script/file
+          https://localhost:8099/api/v1/shell/script/file
 
         # With sudo
         curl -X POST \\
@@ -515,7 +515,7 @@ async def exec_script_file(
           -F "file=@deploy.sh" \\
           -F "shell=bash" \\
           -F "sudo=true" \\
-          http://localhost:8099/api/v1/shell/script/file
+          https://localhost:8099/api/v1/shell/script/file
 
     Parameters
     ----------

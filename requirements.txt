@@ -17,7 +17,12 @@ cryptography>=42.0.0
 openai>=1.30.0
 openpyxl>=3.1.0
 matplotlib>=3.9.0
-pyjwt 
-cryptography 
-openpyxl 
+pyjwt
+cryptography
+openpyxl
 pyotp
+# v3.0 — SQLAlchemy + Alembic + DuckDB unified DB layer
+SQLAlchemy>=2.0.30
+alembic>=1.13.0
+duckdb>=0.10.0
+rich>=13.7.0  # v3.3 — pretty CLI tables, progress bars, colored output
