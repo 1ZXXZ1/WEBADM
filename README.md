@@ -27,16 +27,18 @@
 ### 1. Установка
 
 ```bash
+cd /opt
+git clone https://github.com/1ZXXZ1/WEBADM
+cd WEBADM
 # Копируем в /opt/webadc
-sudo cp -r WEBADC-git /opt/webadc
+sudo cp -r WEBADC /opt/webadc
 cd /opt/webadc
 
 # Устанавливаем wrapper как системную команду
 sudo install -m 755 webadc /usr/local/bin/webadc
 
 # Устанавливаем Python-зависимости
-pip install -r requirements.txt
-# или на ALT Linux: apt-get install python3-psycopg2 python3-sqlalchemy
+sudo pip3 install -r requirements.txt
 ```
 
 ### 2. Конфигурация
